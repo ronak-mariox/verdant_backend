@@ -11,7 +11,7 @@ customerWishlistRouter.use(authenticate, authorize('customer'));
 customerWishlistRouter.get('/', asyncHandler(ctrl.listWishlist));
 customerWishlistRouter.post(
   '/:productId/toggle',
-  param('productId').isString().notEmpty(),
+  param('productId').isMongoId(),
   handleValidation,
   asyncHandler(ctrl.toggleWishlist),
 );

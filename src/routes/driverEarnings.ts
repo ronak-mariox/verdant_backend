@@ -25,7 +25,7 @@ driverEarningsRouter.get(
 
 driverEarningsRouter.get(
   '/breakdown/:orderId',
-  param('orderId').isString().notEmpty(),
+  param('orderId').isMongoId(),
   handleValidation,
   asyncHandler(ctrl.getBreakdown),
 );

@@ -25,5 +25,6 @@ const otpRequestSchema = new Schema<OtpRequestDoc>(
 );
 
 otpRequestSchema.index({ phone: 1, role: 1 });
+otpRequestSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 export const OtpRequest = model<OtpRequestDoc>('OtpRequest', otpRequestSchema);

@@ -1,9 +1,10 @@
 import type { Request, Response } from 'express';
-import { Category } from '../models/Category';
+import { Category, type CategoryVariantConfig } from '../models/Category';
 import { Product } from '../models/Product';
 import { HttpError } from '../lib/httpError';
-import { toSafeJson } from '../lib/sanitize';
+import { escapeRegex, toSafeJson } from '../lib/sanitize';
 import { notifyVendor } from '../lib/vendorNotify';
+import { assertCategoryAssignable } from '../lib/catalog';
 
 // ---------------------------------------------------------------------------
 // Categories
@@ -14,12 +15,40 @@ export async function listCategories(_req: Request, res: Response) {
   res.json(categories.map((c) => toSafeJson(c)));
 }
 
+function cleanVariantConfig(config: CategoryVariantConfig): CategoryVariantConfig {
+  const clean = (list?: string[]) => [...new Set((list ?? []).map((item) => item.trim()).filter(Boolean))];
+  const base = { kind: config.kind, label: config.label.trim() };
+  if (config.kind === 'weight_volume') return { ...base, units: clean(config.units) };
+  if (config.kind === 'attribute') {
+    return { ...base, options: clean(config.options), allowCustom: config.allowCustom === true };
+  }
+  return base;
+}
+
+/**
+ * Accepts either the list (`variantConfigs`) or the legacy single `variantConfig` and
+ * returns both kept in sync; undefined when the request touches neither.
+ */
+function resolveVariantInput(
+  body: Record<string, unknown>,
+): { variantConfig?: CategoryVariantConfig; variantConfigs?: CategoryVariantConfig[] } | undefined {
+  const { variantConfig, variantConfigs } = body as {
+    variantConfig?: CategoryVariantConfig | null;
+    variantConfigs?: CategoryVariantConfig[] | null;
+  };
+  if (variantConfigs === undefined && variantConfig === undefined) return undefined;
+  const list = (variantConfigs !== undefined ? (variantConfigs ?? []) : variantConfig ? [variantConfig] : []).map(
+    cleanVariantConfig,
+  );
+  return list.length > 0 ? { variantConfig: list[0], variantConfigs: list } : {};
+}
+
 function slugify(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 }
 
 export async function createCategory(req: Request, res: Response) {
-  const { name, imageUrl, sortOrder, isActive, showOnHome, variantConfig } = req.body;
+  const { name, imageUrl, sortOrder, isActive, showOnHome } = req.body;
   const category = await Category.create({
     name,
     slug: slugify(name),
@@ -28,7 +57,7 @@ export async function createCategory(req: Request, res: Response) {
     isActive: isActive ?? true,
     showOnHome: showOnHome ?? true,
     subcategories: [],
-    variantConfig,
+    ...resolveVariantInput(req.body),
   });
   res.status(201).json(toSafeJson(category));
 }
@@ -37,7 +66,7 @@ export async function updateCategory(req: Request, res: Response) {
   const category = await Category.findById(req.params.id);
   if (!category) throw new HttpError(404, 'Category not found');
 
-  const { name, imageUrl, sortOrder, isActive, showOnHome, variantConfig } = req.body;
+  const { name, imageUrl, sortOrder, isActive, showOnHome } = req.body;
   if (name !== undefined) {
     category.name = name;
     category.slug = slugify(name);
@@ -46,7 +75,11 @@ export async function updateCategory(req: Request, res: Response) {
   if (sortOrder !== undefined) category.sortOrder = sortOrder;
   if (isActive !== undefined) category.isActive = isActive;
   if (showOnHome !== undefined) category.showOnHome = showOnHome;
-  if (variantConfig !== undefined) category.variantConfig = variantConfig;
+  const variants = resolveVariantInput(req.body);
+  if (variants) {
+    category.variantConfig = variants.variantConfig;
+    category.variantConfigs = variants.variantConfigs;
+  }
   await category.save();
   res.json(toSafeJson(category));
 }
@@ -64,8 +97,14 @@ export async function addSubcategory(req: Request, res: Response) {
   const category = await Category.findById(req.params.id);
   if (!category) throw new HttpError(404, 'Category not found');
 
-  const { name, imageUrl, variantConfig } = req.body;
-  category.subcategories.push({ id: `sub-${Date.now()}`, name, imageUrl, isActive: true, variantConfig });
+  const { name, imageUrl } = req.body;
+  category.subcategories.push({
+    id: `sub-${Date.now()}`,
+    name,
+    imageUrl,
+    isActive: true,
+    ...resolveVariantInput(req.body),
+  });
   await category.save();
   res.status(201).json(toSafeJson(category));
 }
@@ -77,12 +116,16 @@ export async function updateSubcategory(req: Request, res: Response) {
   const sub = category.subcategories.find((s) => s.id === req.params.subId);
   if (!sub) throw new HttpError(404, 'Subcategory not found');
 
-  const { name, imageUrl, isActive, variantConfig } = req.body;
+  const { name, imageUrl, isActive } = req.body;
   if (name !== undefined) sub.name = name;
   if (imageUrl !== undefined) sub.imageUrl = imageUrl;
   if (isActive !== undefined) sub.isActive = isActive;
-  // null clears a subcategory's override so it falls back to the category's own variantConfig.
-  if (variantConfig !== undefined) sub.variantConfig = variantConfig ?? undefined;
+  // An empty result (null sent) clears the override so the subcategory inherits its category's variant types.
+  const variants = resolveVariantInput(req.body);
+  if (variants) {
+    sub.variantConfig = variants.variantConfig;
+    sub.variantConfigs = variants.variantConfigs;
+  }
   await category.save();
   res.json(toSafeJson(category));
 }
@@ -105,7 +148,7 @@ export async function listAllProducts(req: Request, res: Response) {
   const filter: Record<string, unknown> = {};
   if (status) filter.status = status;
   if (vendorId) filter.vendorId = vendorId;
-  if (search) filter.name = { $regex: search, $options: 'i' };
+  if (search) filter.name = { $regex: escapeRegex(search), $options: 'i' };
 
   const page = Math.max(1, Number(pageRaw) || 1);
   const limit = Math.min(100, Math.max(1, Number(limitRaw) || 50));
@@ -155,8 +198,12 @@ export async function updateProductForAdmin(req: Request, res: Response) {
   if (!product) throw new HttpError(404, 'Product not found');
 
   const {
+    categoryId,
+    subcategoryId,
     name,
     description,
+    brand,
+    unit,
     images,
     variants,
     tags,
@@ -169,8 +216,17 @@ export async function updateProductForAdmin(req: Request, res: Response) {
     reorderLevel,
     maxStock,
   } = req.body;
+
+  if (categoryId !== undefined || subcategoryId !== undefined) {
+    await assertCategoryAssignable(categoryId ?? String(product.categoryId), subcategoryId ?? product.subcategoryId);
+  }
+
   Object.assign(product, {
+    ...(categoryId !== undefined && { categoryId }),
+    ...(subcategoryId !== undefined && { subcategoryId }),
     ...(name !== undefined && { name }),
+    ...(brand !== undefined && { brand }),
+    ...(unit !== undefined && { unit }),
     ...(description !== undefined && { description }),
     ...(images !== undefined && { images }),
     ...(variants !== undefined && { variants }),

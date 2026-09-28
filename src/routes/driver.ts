@@ -4,10 +4,11 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { normalizePhone } from '../lib/json';
 import { handleValidation } from '../middleware/validate';
 import { authenticate, authorize } from '../middleware/auth';
-import { upload } from '../lib/upload';
+import { upload, uploadImage } from '../lib/upload';
 import { asyncHandler } from '../utils/asyncHandler';
 import { env } from '../lib/env';
 import * as driverController from '../controllers/driverController';
+import * as driverOrderController from '../controllers/driverOrderController';
 import { driverOrderRouter } from './driverOrders';
 import { driverEarningsRouter } from './driverEarnings';
 import { driverIncentiveRouter } from './driverIncentives';
@@ -80,7 +81,27 @@ driverRouter.patch(
   asyncHandler(driverController.updateStatus),
 );
 
+driverRouter.patch(
+  '/location',
+  authenticate,
+  authorize('driver'),
+  body('lat').isFloat({ min: -90, max: 90 }),
+  body('lng').isFloat({ min: -180, max: 180 }),
+  handleValidation,
+  asyncHandler(driverController.updateLocation),
+);
+
 driverRouter.get('/home-summary', authenticate, authorize('driver'), asyncHandler(driverController.getHomeSummary));
+
+// Photo evidence for delivery issues / emergency reports — returns { url } to
+// pass back in `evidenceUrls`.
+driverRouter.post(
+  '/uploads/evidence',
+  authenticate,
+  authorize('driver'),
+  uploadImage.single('file'),
+  asyncHandler(driverOrderController.uploadEvidence),
+);
 
 // ---------------------------------------------------------------------------
 // Multi-step registration — mirrors DeliveryApp's Registration wizard.

@@ -18,5 +18,5 @@ driverNotificationRouter.patch(
   asyncHandler(ctrl.markUnread),
 );
 driverNotificationRouter.delete('/', asyncHandler(ctrl.clearAll));
-driverNotificationRouter.patch('/:id/read', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.markRead));
-driverNotificationRouter.delete('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.dismissNotification));
+driverNotificationRouter.patch('/:id/read', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.markRead));
+driverNotificationRouter.delete('/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.dismissNotification));

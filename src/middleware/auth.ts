@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import { verifyAccessToken, type Role } from '../lib/jwt';
+import { checkAccountStatus, restrictedBody } from '../lib/accountStatus';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -18,13 +19,30 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
   }
 
   const token = header.slice('Bearer '.length);
+  let payload: ReturnType<typeof verifyAccessToken>;
   try {
-    const payload = verifyAccessToken(token);
-    req.user = { id: payload.sub, role: payload.role };
-    next();
+    payload = verifyAccessToken(token);
   } catch {
     res.status(401).json({ error: 'Invalid or expired access token' });
+    return;
   }
+
+  // A blocked/suspended/rejected account is cut off immediately, not when its
+  // access token happens to expire.
+  checkAccountStatus(payload.role, payload.sub)
+    .then((check) => {
+      if (!check.ok) {
+        if (check.reason === 'not_found') {
+          res.status(401).json({ error: 'This account no longer exists' });
+          return;
+        }
+        res.status(403).json(restrictedBody(payload.role, check.status));
+        return;
+      }
+      req.user = { id: payload.sub, role: payload.role };
+      next();
+    })
+    .catch(next);
 }
 
 export function authorize(...roles: Role[]) {

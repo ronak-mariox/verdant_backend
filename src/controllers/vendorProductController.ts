@@ -2,7 +2,8 @@ import type { Request, Response } from 'express';
 import { Product } from '../models/Product';
 import { Vendor } from '../models/Vendor';
 import { HttpError } from '../lib/httpError';
-import { toSafeJson } from '../lib/sanitize';
+import { arrayPagination, escapeRegex, toSafeJson } from '../lib/sanitize';
+import { assertCategoryAssignable } from '../lib/catalog';
 import { publicUrlFor } from '../lib/upload';
 import { notifyVendor } from '../lib/vendorNotify';
 import { StockAdjustment, type StockEventType } from '../models/StockAdjustment';
@@ -27,9 +28,10 @@ export async function listMyProducts(req: Request, res: Response) {
   const { status, search } = req.query as Record<string, string | undefined>;
   const filter: Record<string, unknown> = { vendorId: req.user!.id };
   if (status) filter.status = status;
-  if (search) filter.name = { $regex: search, $options: 'i' };
+  if (search) filter.name = { $regex: escapeRegex(search), $options: 'i' };
 
-  const products = await Product.find(filter).sort({ createdAt: -1 });
+  const { skip, limit } = arrayPagination(req.query as Record<string, unknown>);
+  const products = await Product.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit);
   res.json(products.map((p) => toSafeJson(p)));
 }
 
@@ -68,6 +70,8 @@ export async function createProduct(req: Request, res: Response) {
     reorderLevel,
     maxStock,
   } = req.body;
+
+  await assertCategoryAssignable(categoryId, subcategoryId);
 
   const product = await Product.create({
     vendorId: req.user!.id,
@@ -115,6 +119,13 @@ export async function updateProduct(req: Request, res: Response) {
     reorderLevel,
     maxStock,
   } = req.body;
+
+  if (categoryId !== undefined || subcategoryId !== undefined) {
+    await assertCategoryAssignable(categoryId ?? String(product.categoryId), subcategoryId ?? product.subcategoryId);
+  }
+
+  // Editing display fields on a live product keeps it live — the data is
+  // validated here, not sent back through moderation.
   Object.assign(product, {
     ...(categoryId !== undefined && { categoryId }),
     ...(subcategoryId !== undefined && { subcategoryId }),

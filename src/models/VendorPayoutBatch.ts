@@ -15,6 +15,8 @@ export interface VendorPayoutBatchDoc {
   gstOnCommission: number;
   adjustments: number;
   netPayout: number;
+  settlementIds: Types.ObjectId[];
+  settlementCount: number;
   status: VendorPayoutBatchStatus;
   bankAccountLabel?: string;
   transactionRef?: string;
@@ -37,6 +39,8 @@ const vendorPayoutBatchSchema = new Schema<VendorPayoutBatchDoc>(
     gstOnCommission: { type: Number, required: true },
     adjustments: { type: Number, required: true, default: 0 },
     netPayout: { type: Number, required: true },
+    settlementIds: { type: [Schema.Types.ObjectId], ref: 'VendorSettlement', default: [] },
+    settlementCount: { type: Number, default: 0 },
     status: { type: String, enum: ['pending', 'paid', 'failed'], default: 'pending' },
     bankAccountLabel: { type: String },
     transactionRef: { type: String },

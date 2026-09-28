@@ -20,31 +20,35 @@ async function loadVendorOrThrow(vendorId: string) {
  * progress) — reusing those here would silently regress an already-active
  * vendor's registration state every time they edited a field later.
  */
+const EDITABLE_OWNER_FIELDS = ['fullName', 'email', 'mobile'];
+const EDITABLE_BUSINESS_FIELDS = ['businessName', 'displayName', 'category', 'addressLine1', 'addressLine2', 'city', 'state', 'pincode', 'country'];
+const EDITABLE_STORE_FIELDS = ['storeName', 'storeAddress', 'landmark', 'contactNumber', 'storeType', 'operatingHours', 'location'];
+const EDITABLE_STORE_PROFILE_FIELDS = ['storeName', 'description', 'primaryCategory', 'subCategory', 'tags', 'minimumOrderValue', 'avgPrepTime'];
+
+function pick(source: Record<string, unknown> | undefined, keys: string[]): Record<string, unknown> {
+  if (!source) return {};
+  return Object.fromEntries(keys.filter((k) => source[k] !== undefined).map((k) => [k, source[k]]));
+}
+
 export async function updateProfile(req: Request, res: Response) {
   const vendor = await loadVendorOrThrow(req.user!.id);
-  const { businessInfo, ownerInfo, storeInfo, storeProfile, gstDetails, panDetails, businessType } = req.body as {
+  const { businessInfo, ownerInfo, storeInfo, storeProfile } = req.body as {
     businessInfo?: Record<string, unknown>;
     ownerInfo?: Record<string, unknown>;
     storeInfo?: Record<string, unknown>;
     storeProfile?: Record<string, unknown>;
-    gstDetails?: Record<string, unknown>;
-    panDetails?: Record<string, unknown>;
-    businessType?: string;
   };
 
-  if (businessInfo) vendor.set('businessInfo', { ...vendor.businessInfo, ...businessInfo });
-  if (ownerInfo) vendor.set('ownerInfo', { ...vendor.ownerInfo, ...ownerInfo });
-  if (storeInfo) vendor.set('storeInfo', { ...vendor.storeInfo, ...storeInfo });
-  if (gstDetails) vendor.set('gstDetails', { ...vendor.gstDetails, ...gstDetails });
-  if (panDetails) vendor.set('panDetails', { ...vendor.panDetails, ...panDetails });
-  if (businessType) vendor.set('businessType', businessType);
+  // Identity/KYC fields (PAN, GST, business proof, bank details, business type)
+  // are rejected by the route validators — they only change via the document
+  // replace / bank-request review flows.
+  if (ownerInfo) vendor.set('ownerInfo', { ...vendor.ownerInfo, ...pick(ownerInfo, EDITABLE_OWNER_FIELDS) });
+  if (businessInfo) vendor.set('businessInfo', { ...vendor.businessInfo, ...pick(businessInfo, EDITABLE_BUSINESS_FIELDS) });
+  if (storeInfo) vendor.set('storeInfo', { ...vendor.storeInfo, ...pick(storeInfo, EDITABLE_STORE_FIELDS) });
   // storeProfile (store display name/description) is the same field the
   // post-approval store-setup wizard writes — kept in sync so the name/
   // description customers see stays consistent with what's edited here.
-  if (storeProfile) vendor.set('storeProfile', { ...vendor.storeProfile, ...storeProfile });
-
-  // bankDetails is intentionally NOT accepted here — live bank details only
-  // change via requestBankDetailsChange + admin approval (reviewBankRequest).
+  if (storeProfile) vendor.set('storeProfile', { ...vendor.storeProfile, ...pick(storeProfile, EDITABLE_STORE_PROFILE_FIELDS) });
 
   await vendor.save();
   res.json(toSafeJson(vendor, ['passwordHash']));
@@ -84,18 +88,23 @@ export async function getBankDetailsRequestStatus(req: Request, res: Response) {
   res.json(vendor.pendingBankDetails ?? null);
 }
 
-/** Real order counts/revenue for the Profile tab's stat card — no rating system
- * exists yet, so `rating` is honestly null rather than a fabricated number. */
+/** Real order counts/revenue/rating for the Profile tab's stat card — `rating`
+ * is the average of customers' per-order vendor ratings, null until one exists. */
 export async function getStats(req: Request, res: Response) {
   const vendorObjectId = new Types.ObjectId(req.user!.id);
-  const [orders, revenueAgg] = await Promise.all([
+  const [orders, revenueAgg, ratingAgg] = await Promise.all([
     Order.countDocuments({ vendorId: vendorObjectId }),
     Order.aggregate([
       { $match: { vendorId: vendorObjectId, status: 'delivered' } },
       { $group: { _id: null, revenue: { $sum: '$pricing.grandTotal' } } },
     ]),
+    Order.aggregate([
+      { $match: { vendorId: vendorObjectId, vendorRating: { $ne: null } } },
+      { $group: { _id: null, avg: { $avg: '$vendorRating' }, count: { $sum: 1 } } },
+    ]),
   ]);
-  res.json({ orders, revenue: revenueAgg[0]?.revenue ?? 0, rating: null });
+  const rating = ratingAgg[0] ? Math.round(ratingAgg[0].avg * 10) / 10 : null;
+  res.json({ orders, revenue: revenueAgg[0]?.revenue ?? 0, rating, ratingCount: ratingAgg[0]?.count ?? 0 });
 }
 
 export async function listAddresses(req: Request, res: Response) {

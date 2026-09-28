@@ -17,4 +17,4 @@ driverIncentiveRouter.get(
   handleValidation,
   asyncHandler(ctrl.getBonusHistory),
 );
-driverIncentiveRouter.get('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.getIncentiveById));
+driverIncentiveRouter.get('/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.getIncentiveById));

@@ -3,54 +3,58 @@ import { body, param } from 'express-validator';
 import { handleValidation } from '../middleware/validate';
 import { authenticate, authorize } from '../middleware/auth';
 import { asyncHandler } from '../utils/asyncHandler';
+import { productBodyValidators } from './productValidators';
+import { VARIANT_KINDS, type VariantKind } from '../models/Category';
 import * as ctrl from '../controllers/adminCatalogController';
 
 export const adminCatalogRouter = Router();
 adminCatalogRouter.use(authenticate, authorize('admin'));
 
 // Categories
-const variantConfigValidators = [
-  body('variantConfig').optional().isObject().withMessage('variantConfig must be an object'),
-  body('variantConfig.kind')
-    .if(body('variantConfig').exists())
-    .isIn(['weight_volume', 'attribute'])
-    .withMessage('variantConfig.kind must be weight_volume or attribute'),
-  body('variantConfig.label')
-    .if(body('variantConfig').exists())
-    .isString()
-    .trim()
-    .notEmpty()
-    .withMessage('variantConfig.label is required'),
-  body('variantConfig.units').optional().isArray().withMessage('variantConfig.units must be an array of strings'),
-  body('variantConfig.units.*').optional().isString(),
-  body('variantConfig.options').optional().isArray().withMessage('variantConfig.options must be an array of strings'),
-  body('variantConfig.options.*').optional().isString(),
-];
+function assertVariantConfig(value: unknown, field: string): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`${field} must be an object`);
+  }
+  const config = value as Record<string, unknown>;
+  if (!VARIANT_KINDS.includes(config.kind as VariantKind)) {
+    throw new Error(`${field}.kind must be one of ${VARIANT_KINDS.join(', ')}`);
+  }
+  if (typeof config.label !== 'string' || !config.label.trim()) {
+    throw new Error(`${field}.label is required`);
+  }
+  for (const key of ['units', 'options'] as const) {
+    const list = config[key];
+    if (list !== undefined && (!Array.isArray(list) || !list.every((item) => typeof item === 'string'))) {
+      throw new Error(`${field}.${key} must be an array of strings`);
+    }
+  }
+  if (config.allowCustom !== undefined && typeof config.allowCustom !== 'boolean') {
+    throw new Error(`${field}.allowCustom must be a boolean`);
+  }
+  if (config.kind === 'attribute' && !config.allowCustom && !(config.options as string[] | undefined)?.length) {
+    throw new Error(`${field} needs at least one option, or allow vendors to enter their own`);
+  }
+}
 
-// Subcategory PATCH allows variantConfig: null to clear a subcategory's override
-// (falling back to the category's own variantConfig), which the plain isObject()
-// check above rejects — so PATCH uses this custom validator instead.
-const nullableVariantConfigValidator = body('variantConfig')
-  .optional({ values: 'null' })
-  .custom((value) => {
-    if (value === null) return true;
-    if (typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error('variantConfig must be an object or null');
-    }
-    if (!['weight_volume', 'attribute'].includes(value.kind)) {
-      throw new Error('variantConfig.kind must be weight_volume or attribute');
-    }
-    if (typeof value.label !== 'string' || !value.label.trim()) {
-      throw new Error('variantConfig.label is required');
-    }
-    if (value.units !== undefined && (!Array.isArray(value.units) || !value.units.every((u: unknown) => typeof u === 'string'))) {
-      throw new Error('variantConfig.units must be an array of strings');
-    }
-    if (value.options !== undefined && (!Array.isArray(value.options) || !value.options.every((o: unknown) => typeof o === 'string'))) {
-      throw new Error('variantConfig.options must be an array of strings');
-    }
-    return true;
-  });
+// null clears the setting: a subcategory then inherits its category's variant types.
+const variantConfigValidators = [
+  body('variantConfig')
+    .optional({ values: 'null' })
+    .custom((value) => {
+      if (value !== null) assertVariantConfig(value, 'variantConfig');
+      return true;
+    }),
+  body('variantConfigs')
+    .optional({ values: 'null' })
+    .custom((value) => {
+      if (value === null) return true;
+      if (!Array.isArray(value)) throw new Error('variantConfigs must be an array');
+      value.forEach((config, index) => assertVariantConfig(config, `variantConfigs[${index}]`));
+      const labels = value.map((config) => String(config.label).trim().toLowerCase());
+      if (new Set(labels).size !== labels.length) throw new Error('Each variant type needs a different label');
+      return true;
+    }),
+];
 
 adminCatalogRouter.get('/categories', asyncHandler(ctrl.listCategories));
 adminCatalogRouter.post(
@@ -62,16 +66,16 @@ adminCatalogRouter.post(
 );
 adminCatalogRouter.patch(
   '/categories/:id',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   ...variantConfigValidators,
   handleValidation,
   asyncHandler(ctrl.updateCategory),
 );
-adminCatalogRouter.delete('/categories/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.deleteCategory));
+adminCatalogRouter.delete('/categories/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.deleteCategory));
 
 adminCatalogRouter.post(
   '/categories/:id/subcategories',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   body('name').isString().trim().notEmpty().withMessage('Subcategory name is required'),
   ...variantConfigValidators,
   handleValidation,
@@ -79,15 +83,15 @@ adminCatalogRouter.post(
 );
 adminCatalogRouter.patch(
   '/categories/:id/subcategories/:subId',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   param('subId').isString().notEmpty(),
-  nullableVariantConfigValidator,
+  ...variantConfigValidators,
   handleValidation,
   asyncHandler(ctrl.updateSubcategory),
 );
 adminCatalogRouter.delete(
   '/categories/:id/subcategories/:subId',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   param('subId').isString().notEmpty(),
   handleValidation,
   asyncHandler(ctrl.removeSubcategory),
@@ -95,13 +99,19 @@ adminCatalogRouter.delete(
 
 // Product moderation
 adminCatalogRouter.get('/products', asyncHandler(ctrl.listAllProducts));
-adminCatalogRouter.get('/products/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.getProductForAdmin));
+adminCatalogRouter.get('/products/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.getProductForAdmin));
 adminCatalogRouter.patch(
   '/products/:id/status',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   body('status').isIn(['active', 'inactive', 'rejected']),
   body('rejectionReason').optional({ values: 'falsy' }).isString(),
   handleValidation,
   asyncHandler(ctrl.updateProductStatus),
 );
-adminCatalogRouter.patch('/products/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.updateProductForAdmin));
+adminCatalogRouter.patch(
+  '/products/:id',
+  param('id').isMongoId(),
+  ...productBodyValidators('update'),
+  handleValidation,
+  asyncHandler(ctrl.updateProductForAdmin),
+);

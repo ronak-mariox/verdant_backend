@@ -1,15 +1,13 @@
 import type { Request, Response } from 'express';
 import type { HydratedDocument } from 'mongoose';
 import { Order } from '../models/Order';
-import { Product } from '../models/Product';
 import { Customer } from '../models/Customer';
 import { HttpError } from '../lib/httpError';
-import { toSafeJson } from '../lib/sanitize';
+import { arrayPagination, toSafeJson } from '../lib/sanitize';
 import { canTransition } from '../lib/orderStatus';
+import { releaseOrderResources } from '../lib/orderStock';
 import { notifyOrderStatusChange } from '../lib/notify';
 import { notifyDriverOrderEvent } from '../lib/driverNotify';
-import { notifyVendor } from '../lib/vendorNotify';
-import { recordVendorSettlement } from '../lib/commission';
 import type { OrderStatus, OrderDoc } from '../models/Order';
 
 /** The vendor app's order UI expects the customer's name/phone inline on each
@@ -23,7 +21,7 @@ async function withCustomerInfo(orders: HydratedDocument<OrderDoc>[]) {
   return orders.map((o) => {
     const customer = byId.get(String(o.customerId));
     return {
-      ...toSafeJson(o, ['deliveryOtpHash']),
+      ...toSafeJson(o, ['deliveryOtpHash', 'deliveryOtp', 'deliveryOtpAttempts']),
       customerName: customer?.name ?? 'Customer',
       customerPhone: customer?.phone,
     };
@@ -34,7 +32,8 @@ export async function listMyOrders(req: Request, res: Response) {
   const { status } = req.query as Record<string, string | undefined>;
   const filter: Record<string, unknown> = { vendorId: req.user!.id };
   if (status) filter.status = status;
-  const orders = await Order.find(filter).sort({ createdAt: -1 });
+  const { skip, limit } = arrayPagination(req.query as Record<string, unknown>);
+  const orders = await Order.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit);
   res.json(await withCustomerInfo(orders));
 }
 
@@ -54,35 +53,21 @@ export async function updateOrderStatus(req: Request, res: Response) {
     throw new HttpError(409, `Cannot move order from "${order.status}" to "${nextStatus}"`);
   }
 
-  if (nextStatus === 'rejected' || nextStatus === 'cancelled') {
-    for (const item of order.items) {
-      await Product.updateOne({ _id: item.productId, 'variants.id': item.variantId }, { $inc: { 'variants.$.stock': item.quantity } });
-    }
-  }
+  const isTerminal = nextStatus === 'rejected' || nextStatus === 'cancelled';
+  if (isTerminal) await releaseOrderResources(order);
 
   const now = new Date();
   order.status = nextStatus;
   order.statusHistory.push({ status: nextStatus, at: now, note: req.body.note });
-  if (nextStatus === 'rejected' || nextStatus === 'cancelled') {
+  if (isTerminal) {
     order.cancelledBy = 'vendor';
     order.cancelReason = req.body.note;
   }
-  if (nextStatus === 'delivered') order.deliveredAt = now;
   await order.save();
 
-  await notifyOrderStatusChange(order.customerId, order._id, order.orderNumber, nextStatus, req.body.note);
+  await notifyOrderStatusChange(order, nextStatus, req.body.note);
   if (nextStatus === 'cancelled' && order.driverId) {
     await notifyDriverOrderEvent(order.driverId, 'order-cancelled', order._id, order.orderNumber, req.body.note);
-  }
-  if (nextStatus === 'delivered') {
-    await recordVendorSettlement(order);
-    await notifyVendor(
-      order.vendorId,
-      'payment',
-      'Payment Received',
-      `Order #${order.orderNumber} · ₹${order.pricing.grandTotal}`,
-      { orderId: order._id },
-    );
   }
 
   const [withInfo] = await withCustomerInfo([order]);

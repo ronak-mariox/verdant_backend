@@ -8,7 +8,9 @@ import { Address } from '../src/models/Address';
 import { Driver } from '../src/models/Driver';
 import { Order, type OrderItemSnapshot, type OrderPricing, type OrderStatus } from '../src/models/Order';
 import { EarningsLedger } from '../src/models/EarningsLedger';
+import { Incentive } from '../src/models/Incentive';
 import { priceLine, computeOrderPricing } from '../src/lib/pricing';
+import { DRIVER_BASE_PAY, getDriverBalance } from '../src/lib/driverEarnings';
 
 declare const process: {
   exitCode?: number;
@@ -193,6 +195,7 @@ async function main() {
     let pickupConfirmedAt: Date | undefined;
     let deliveredAt: Date | undefined;
     let deliveryOtpHash: string | undefined;
+    let deliveryOtp: string | undefined;
     let driverEarnings: { base: number; distance: number; onTimeBonus: number; incentiveBonus: number; total: number } | undefined;
     let cancelledBy: 'customer' | 'vendor' | 'admin' | 'driver' | undefined;
     let cancelReason: string | undefined;
@@ -202,16 +205,18 @@ async function main() {
     if (def.status === 'out_for_delivery' || def.status === 'delivered') {
       advance('out_for_delivery', 3);
       pickupConfirmedAt = cursor;
-      // Fixed hash for a known code isn't needed — dev master OTP (123456) always
-      // works via compareDeliveryOtp's dev bypass, so any hash placeholder is fine.
-      deliveryOtpHash = await bcrypt.hash('000000', 10);
+      // Dummy OTP flow: the plaintext is shown to the customer in-app (the dev
+      // master OTP 123456 also always works via compareDeliveryOtp's bypass).
+      deliveryOtp = '482913';
+      deliveryOtpHash = await bcrypt.hash(deliveryOtp, 10);
     }
 
     if (def.status === 'delivered') {
       advance('delivered', 20);
       deliveredAt = cursor;
       deliveryOtpHash = undefined;
-      const base = pricing.deliveryFee || 30;
+      deliveryOtp = undefined;
+      const base = DRIVER_BASE_PAY;
       const distance = 10;
       const onTimeBonus = 10;
       driverEarnings = { base, distance, onTimeBonus, incentiveBonus: 0, total: base + distance + onTimeBonus };
@@ -239,6 +244,7 @@ async function main() {
       placedAt,
       deliveredAt,
       deliveryOtpHash,
+      deliveryOtp,
       pickupConfirmedAt,
       driverEarnings,
       cancelledBy,
@@ -246,7 +252,7 @@ async function main() {
     });
 
     if (def.status === 'delivered' && driverEarnings) {
-      let balance = (await EarningsLedger.findOne({ driverId: driver._id }).sort({ createdAt: -1 }))?.balanceAfter ?? 0;
+      let balance = await getDriverBalance(driver._id);
       for (const [type, amount] of [
         ['delivery_fee', driverEarnings.base],
         ['distance_bonus', driverEarnings.distance],
@@ -269,7 +275,50 @@ async function main() {
     console.log(`Created demo order ${orderNumber} (${def.status}${def.assignToDriver ? ', assigned to demo driver' : ''}).`);
   }
 
+  await seedIncentives();
+
   console.log('Delivery seed complete. Demo driver OTP (dev mode): 123456.');
+}
+
+/** Two sample incentives so the DeliveryApp's Incentives tab has real rows. */
+async function seedIncentives() {
+  const now = new Date();
+  const daysFromNow = (days: number) => new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+  const samples = [
+    {
+      title: 'Weekend Warrior',
+      description: 'Complete 20 deliveries between Friday and Sunday to earn a ₹300 bonus.',
+      rewardAmount: 300,
+      targetDeliveries: 20,
+      startAt: daysFromNow(-1),
+      expiresAt: daysFromNow(6),
+      status: 'active' as const,
+      conditions: [
+        { label: 'Maintain a 4.5+ rating', type: 'min_rating', threshold: 4.5 },
+        { label: 'Accept at least 90% of offered orders', type: 'min_acceptance_rate', threshold: 90 },
+      ],
+    },
+    {
+      title: 'Monthly Milestone',
+      description: 'Hit 100 deliveries this month and unlock a ₹1,000 reward.',
+      rewardAmount: 1000,
+      targetDeliveries: 100,
+      startAt: daysFromNow(-7),
+      expiresAt: daysFromNow(23),
+      status: 'active' as const,
+      conditions: [{ label: 'No customer complaints this month', type: 'max_complaints', threshold: 0 }],
+    },
+  ];
+
+  for (const sample of samples) {
+    const existing = await Incentive.findOne({ title: sample.title });
+    if (existing) {
+      console.log(`Incentive "${sample.title}" already exists — skipping.`);
+      continue;
+    }
+    await Incentive.create(sample);
+    console.log(`Created incentive "${sample.title}".`);
+  }
 }
 
 main()

@@ -12,17 +12,17 @@ customerOrderRouter.get('/', asyncHandler(ctrl.listOrders));
 
 customerOrderRouter.post(
   '/',
-  body('addressId').isString().notEmpty().withMessage('Select a delivery address'),
+  body('addressId').isMongoId().withMessage('Select a delivery address'),
   body('paymentMethod').isIn(['cod', 'online']),
   handleValidation,
   asyncHandler(ctrl.createOrder),
 );
 
-customerOrderRouter.get('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.getOrder));
+customerOrderRouter.get('/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.getOrder));
 
 customerOrderRouter.post(
   '/:id/cancel',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   body('reason').optional().isString().trim(),
   handleValidation,
   asyncHandler(ctrl.cancelOrder),
@@ -30,7 +30,7 @@ customerOrderRouter.post(
 
 customerOrderRouter.post(
   '/:id/rate',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   body('stars').isInt({ min: 1, max: 5 }),
   body('reviewText').optional().isString().trim(),
   handleValidation,

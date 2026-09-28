@@ -78,3 +78,14 @@ export async function revokeRefreshToken(refreshToken: string): Promise<void> {
   const tokenHash = hashToken(refreshToken);
   await RefreshToken.updateOne({ tokenHash, revokedAt: null }, { revokedAt: new Date() });
 }
+
+/** Logs a user out of every device — e.g. after a password reset. */
+export async function revokeAllRefreshTokens(userId: string, role: Role): Promise<void> {
+  await RefreshToken.updateMany({ userId, role, revokedAt: null }, { revokedAt: new Date() });
+}
+
+/** Decodes a refresh token's subject/role without rotating it. Throws if invalid. */
+export function peekRefreshToken(refreshToken: string): { userId: string; role: Role } {
+  const payload = verifyRefreshToken(refreshToken);
+  return { userId: payload.sub, role: payload.role };
+}

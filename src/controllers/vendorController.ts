@@ -2,7 +2,8 @@ import type { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { Vendor } from '../models/Vendor';
 import { createOtp, verifyOtp as verifyOtpCode } from '../lib/otp';
-import { issueTokenPair } from '../lib/tokens';
+import { issueTokenPair, revokeAllRefreshTokens } from '../lib/tokens';
+import { restrictedBody } from '../lib/accountStatus';
 import { normalizePhone } from '../lib/json';
 import { toSafeJson } from '../lib/sanitize';
 import { signPurposeToken, verifyPurposeToken } from '../lib/jwt';
@@ -57,8 +58,14 @@ export async function register(req: Request, res: Response) {
     return;
   }
 
+  const existingByPhone = await Vendor.findOne({ phone: purpose.phone });
+  if (existingByPhone?.passwordHash) {
+    res.status(409).json({ error: 'An account with this mobile number already exists — please log in' });
+    return;
+  }
+
   const existingByEmail = await Vendor.findOne({ email: req.body.email });
-  if (existingByEmail) {
+  if (existingByEmail && String(existingByEmail._id) !== String(existingByPhone?._id)) {
     res.status(409).json({ error: 'An account with this email already exists' });
     return;
   }
@@ -86,6 +93,11 @@ export async function login(req: Request, res: Response) {
     return;
   }
 
+  if (vendor.status === 'suspended') {
+    res.status(403).json(restrictedBody('vendor', vendor.status));
+    return;
+  }
+
   const tokens = await issueTokenPair(String(vendor._id), 'vendor');
   res.json({ ...tokens, vendor: toSafeJson(vendor, ['passwordHash']) });
 }
@@ -101,7 +113,12 @@ export async function resetPassword(req: Request, res: Response) {
   }
 
   const passwordHash = await bcrypt.hash(req.body.newPassword, 10);
-  await Vendor.updateOne({ phone: purpose.phone }, { $set: { passwordHash } });
+  const vendor = await Vendor.findOneAndUpdate({ phone: purpose.phone }, { $set: { passwordHash } }, { new: true });
+  if (!vendor) {
+    res.status(404).json({ error: 'No vendor account found for this number' });
+    return;
+  }
+  await revokeAllRefreshTokens(String(vendor._id), 'vendor');
   res.json({ message: 'Password updated — please log in with your new password' });
 }
 

@@ -1,14 +1,23 @@
-import type { HydratedDocument } from 'mongoose';
+import { Types, type HydratedDocument } from 'mongoose';
 import type { OrderDoc } from '../models/Order';
 import { Vendor } from '../models/Vendor';
 import { EarningsLedger } from '../models/EarningsLedger';
 import { haversineKm } from './geo';
 
-/** The driver's running balance is the `balanceAfter` on their most recent ledger
- * entry — avoids re-summing the whole ledger on every earning event. */
+/** Flat amount (₹) a driver earns per completed delivery, regardless of what the
+ * customer was charged for delivery (which is often ₹0 above the minimum order). */
+export const DRIVER_BASE_PAY = 30;
+const PER_KM_RATE = 5;
+const ON_TIME_BONUS = 10;
+/** Deliveries confirmed within this window of being marked out-for-delivery count as on-time. */
+const ON_TIME_WINDOW_MINUTES = 45;
+
 export async function getDriverBalance(driverId: unknown): Promise<number> {
-  const latest = await EarningsLedger.findOne({ driverId: driverId as never }).sort({ createdAt: -1 });
-  return latest?.balanceAfter ?? 0;
+  const rows = await EarningsLedger.aggregate([
+    { $match: { driverId: new Types.ObjectId(String(driverId)) } },
+    { $group: { _id: null, total: { $sum: '$amount' } } },
+  ]);
+  return rows[0]?.total ?? 0;
 }
 
 export interface DeliveryEarningsBreakdown {
@@ -18,16 +27,10 @@ export interface DeliveryEarningsBreakdown {
   total: number;
 }
 
-const PER_KM_RATE = 5;
-const ON_TIME_BONUS = 10;
-/** Deliveries confirmed within this window of being marked out-for-delivery count as on-time. */
-const ON_TIME_WINDOW_MINUTES = 45;
-
-/** Computes what a driver earns for completing this delivery: the order's delivery
- * fee as a base, a per-km bonus from vendor->customer haversine distance (when both
- * have coordinates on file), and a flat on-time bonus if delivered promptly. */
+/** Base pay + a per-km bonus from vendor->customer haversine distance (when both
+ * have coordinates on file) + a flat on-time bonus if delivered promptly. */
 export async function computeDeliveryEarnings(order: HydratedDocument<OrderDoc>): Promise<DeliveryEarningsBreakdown> {
-  const base = order.pricing.deliveryFee ?? 0;
+  const base = DRIVER_BASE_PAY;
 
   let distance = 0;
   const vendor = await Vendor.findById(order.vendorId);
