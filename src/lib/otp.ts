@@ -22,10 +22,10 @@ export async function createOtp(phone: string, role: Role): Promise<{ devOtp?: s
 
   await OtpRequest.create({ phone, role, codeHash, expiresAt });
 
+  if (env.isProd) return {};
   // eslint-disable-next-line no-console
   console.log(`[otp] ${role} ${phone} -> ${code} (expires in ${env.otpTtlMinutes}m)`);
-
-  return env.isProd ? {} : { devOtp: code };
+  return { devOtp: code };
 }
 
 export type OtpVerifyResult = { ok: true } | { ok: false; reason: 'not_found' | 'expired' | 'too_many_attempts' | 'incorrect' };
@@ -64,14 +64,14 @@ export async function verifyOtp(phone: string, role: Role, code: string): Promis
  * stored directly on the order (`Order.deliveryOtpHash`) rather than in `OtpRequest`,
  * since it's scoped to a single order rather than a phone+role login.
  */
-export async function createDeliveryOtp(): Promise<{ hash: string; devOtp?: string }> {
+export async function createDeliveryOtp(): Promise<{ code: string; hash: string; devOtp?: string }> {
   const code = generateCode();
   const hash = await bcrypt.hash(code, 10);
 
+  if (env.isProd) return { code, hash };
   // eslint-disable-next-line no-console
   console.log(`[delivery-otp] -> ${code}`);
-
-  return env.isProd ? { hash } : { hash, devOtp: code };
+  return { code, hash, devOtp: code };
 }
 
 export async function compareDeliveryOtp(code: string, hash: string): Promise<boolean> {

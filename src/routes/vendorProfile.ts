@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { body, param } from 'express-validator';
+import { normalizePhone } from '../lib/json';
 import { handleValidation } from '../middleware/validate';
 import { authenticate, authorize } from '../middleware/auth';
 import { asyncHandler } from '../utils/asyncHandler';
@@ -8,7 +9,45 @@ import * as ctrl from '../controllers/vendorProfileController';
 export const vendorProfileRouter = Router();
 vendorProfileRouter.use(authenticate, authorize('vendor'));
 
-vendorProfileRouter.patch('/', asyncHandler(ctrl.updateProfile));
+const LOCKED_PROFILE_FIELDS = ['panDetails', 'gstDetails', 'businessProof', 'bankDetails', 'businessType'];
+
+vendorProfileRouter.patch(
+  '/',
+  ...LOCKED_PROFILE_FIELDS.map((field) =>
+    body(field).not().exists().withMessage(`${field} cannot be edited here — use the document replace / bank details request flow`),
+  ),
+  body('ownerInfo').optional().isObject(),
+  body('ownerInfo.fullName').optional().isString().trim().isLength({ min: 2, max: 80 }),
+  body('ownerInfo.email').optional().isEmail().normalizeEmail(),
+  body('ownerInfo.mobile').optional().customSanitizer(normalizePhone).isLength({ min: 10, max: 10 }).withMessage('Enter a valid 10-digit mobile number'),
+  body('businessInfo').optional().isObject(),
+  body('businessInfo.businessName').optional().isString().trim().notEmpty(),
+  body('businessInfo.displayName').optional().isString().trim().notEmpty(),
+  body('businessInfo.category').optional().isString().trim().notEmpty(),
+  body('businessInfo.addressLine1').optional().isString().trim().notEmpty(),
+  body('businessInfo.addressLine2').optional({ values: 'null' }).isString().trim(),
+  body('businessInfo.city').optional().isString().trim().notEmpty(),
+  body('businessInfo.state').optional().isString().trim().notEmpty(),
+  body('businessInfo.pincode').optional().isString().isLength({ min: 6, max: 6 }).isNumeric(),
+  body('businessInfo.country').optional().isString().trim().notEmpty(),
+  body('storeInfo').optional().isObject(),
+  body('storeInfo.storeName').optional().isString().trim().notEmpty(),
+  body('storeInfo.storeAddress').optional().isString().trim().notEmpty(),
+  body('storeInfo.landmark').optional({ values: 'null' }).isString().trim(),
+  body('storeInfo.contactNumber').optional().isString().trim().notEmpty(),
+  body('storeInfo.storeType').optional().isString().trim().notEmpty(),
+  body('storeInfo.operatingHours').optional().isString().trim().notEmpty(),
+  body('storeInfo.location').optional().isObject(),
+  body('storeInfo.location.latitude').optional().isFloat(),
+  body('storeInfo.location.longitude').optional().isFloat(),
+  body('storeProfile').optional().isObject(),
+  body('storeProfile.storeName').optional().isString().trim().notEmpty(),
+  body('storeProfile.description').optional().isString().trim().isLength({ max: 250 }),
+  body('storeProfile.tags').optional().isArray(),
+  body('storeProfile.tags.*').isString().trim().notEmpty(),
+  handleValidation,
+  asyncHandler(ctrl.updateProfile),
+);
 vendorProfileRouter.get('/stats', asyncHandler(ctrl.getStats));
 
 vendorProfileRouter.get('/addresses', asyncHandler(ctrl.listAddresses));
@@ -24,7 +63,7 @@ vendorProfileRouter.post(
 );
 vendorProfileRouter.patch(
   '/addresses/:addressId',
-  param('addressId').isString().notEmpty(),
+  param('addressId').isMongoId(),
   body('lat').optional().isFloat(),
   body('lng').optional().isFloat(),
   handleValidation,
@@ -32,13 +71,13 @@ vendorProfileRouter.patch(
 );
 vendorProfileRouter.delete(
   '/addresses/:addressId',
-  param('addressId').isString().notEmpty(),
+  param('addressId').isMongoId(),
   handleValidation,
   asyncHandler(ctrl.removeAddress),
 );
 vendorProfileRouter.patch(
   '/addresses/:addressId/primary',
-  param('addressId').isString().notEmpty(),
+  param('addressId').isMongoId(),
   handleValidation,
   asyncHandler(ctrl.setPrimaryAddress),
 );
@@ -64,7 +103,7 @@ vendorProfileRouter.post(
 );
 vendorProfileRouter.delete(
   '/documents/additional/:documentId',
-  param('documentId').isString().notEmpty(),
+  param('documentId').isMongoId(),
   handleValidation,
   asyncHandler(ctrl.removeAdditionalDocument),
 );

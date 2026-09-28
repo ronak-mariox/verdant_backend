@@ -47,8 +47,20 @@ async function loadVendorOrThrow(vendorId: string) {
   return vendor;
 }
 
+/** Once submitted (or approved) the KYC data is frozen — only a rejected vendor
+ * may edit and resubmit. Post-approval edits go through PATCH /vendor/me. */
+function assertRegistrationEditable(vendor: VendorDoc) {
+  if (vendor.status === 'rejected') return;
+  if (vendor.registrationStep === 'submitted' || vendor.status === 'active') {
+    throw new HttpError(409, 'Registration has already been submitted and can no longer be edited', {
+      reason: 'registration_locked',
+    });
+  }
+}
+
 async function saveStep(vendorId: string, stepKey: StepKey, field: keyof VendorDoc, value: unknown) {
   const vendor = await loadVendorOrThrow(vendorId);
+  assertRegistrationEditable(vendor);
   assertPriorStepsComplete(vendor, stepKey);
   vendor.set(field as string, value);
   vendor.registrationStep = stepKey;
@@ -57,6 +69,7 @@ async function saveStep(vendorId: string, stepKey: StepKey, field: keyof VendorD
 
 export async function saveBusinessType(req: Request, res: Response) {
   const vendor = await loadVendorOrThrow(req.user!.id);
+  assertRegistrationEditable(vendor);
   assertPriorStepsComplete(vendor, 'business-type');
   vendor.businessType = req.body.businessType;
   vendor.registrationStep = 'business-type';
@@ -181,6 +194,7 @@ export async function getStatus(req: Request, res: Response) {
     registrationStep: vendor.registrationStep,
     referenceId: vendor.referenceId ?? null,
     rejectionReason: vendor.rejectionReason ?? null,
+    storeSetupCompleted: Boolean(vendor.storeSetupCompletedAt),
     // The first not-yet-filled step, or null once all 8 are filled — lets the app
     // decide in one lightweight call whether to resume the wizard, send the vendor
     // to review/submit, or let them into the app, instead of ever defaulting to
@@ -195,6 +209,7 @@ export async function getStatus(req: Request, res: Response) {
 
 export async function submit(req: Request, res: Response) {
   const vendor = await loadVendorOrThrow(req.user!.id);
+  assertRegistrationEditable(vendor);
 
   const missingSteps = STEP_ORDER.filter((s) => !vendor[s.field]).map((s) => s.key);
   if (missingSteps.length > 0) {
@@ -206,6 +221,7 @@ export async function submit(req: Request, res: Response) {
   vendor.referenceId = referenceId;
   vendor.status = 'pending';
   vendor.kycStatus = 'pending';
+  vendor.rejectionReason = undefined;
   vendor.registrationStep = 'submitted';
   await vendor.save();
 

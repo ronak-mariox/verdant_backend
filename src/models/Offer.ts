@@ -11,6 +11,7 @@ export interface OfferDoc {
   discountType: OfferDiscountType;
   discountValue: number;
   scope: OfferScope;
+  productIds: Types.ObjectId[];
   categoryIds: Types.ObjectId[];
   minOrderValueEnabled: boolean;
   minOrderValue: number;
@@ -31,6 +32,7 @@ const offerSchema = new Schema<OfferDoc>(
     discountType: { type: String, enum: ['percentage', 'flat'], required: true },
     discountValue: { type: Number, required: true, min: 0 },
     scope: { type: String, enum: ['selected-products', 'entire-store'], required: true },
+    productIds: { type: [Schema.Types.ObjectId], ref: 'Product', default: [] },
     categoryIds: { type: [Schema.Types.ObjectId], ref: 'Category', default: [] },
     minOrderValueEnabled: { type: Boolean, default: false },
     minOrderValue: { type: Number, default: 0 },

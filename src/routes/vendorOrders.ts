@@ -9,12 +9,12 @@ export const vendorOrderRouter = Router();
 vendorOrderRouter.use(authenticate, authorize('vendor'));
 
 vendorOrderRouter.get('/', asyncHandler(ctrl.listMyOrders));
-vendorOrderRouter.get('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.getMyOrder));
+vendorOrderRouter.get('/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.getMyOrder));
 
 vendorOrderRouter.patch(
   '/:id/status',
-  param('id').isString().notEmpty(),
-  body('status').isIn(['accepted', 'rejected', 'cancelled', 'preparing', 'ready_for_pickup', 'out_for_delivery', 'delivered']),
+  param('id').isMongoId(),
+  body('status').isIn(['accepted', 'rejected', 'cancelled', 'preparing', 'ready_for_pickup']),
   body('note').optional().isString().trim(),
   handleValidation,
   asyncHandler(ctrl.updateOrderStatus),

@@ -18,7 +18,7 @@ export async function notifyDriver(
   });
 }
 
-export type DriverOrderEvent = 'order-assigned' | 'order-cancelled';
+export type DriverOrderEvent = 'order-assigned' | 'order-cancelled' | 'order-unassigned';
 
 type OrderEventNotificationBuilder = (orderNumber: string, note?: string) => { title: string; subtitle: string };
 
@@ -31,6 +31,10 @@ const DRIVER_STATUS_NOTIFICATIONS: Record<DriverOrderEvent, OrderEventNotificati
     title: 'Delivery cancelled',
     subtitle: note ? `Order #${orderNumber} was cancelled: ${note}` : `Order #${orderNumber} was cancelled.`,
   }),
+  'order-unassigned': (orderNumber, note) => ({
+    title: 'Delivery reassigned',
+    subtitle: note ? `Order #${orderNumber} was reassigned: ${note}` : `Order #${orderNumber} was reassigned to another rider.`,
+  }),
 };
 
 export async function notifyDriverOrderEvent(
@@ -41,5 +45,22 @@ export async function notifyDriverOrderEvent(
   note?: string,
 ) {
   const { title, subtitle } = DRIVER_STATUS_NOTIFICATIONS[event](orderNumber, note);
-  await notifyDriver(driverId, 'Orders', title, subtitle, { relatedEntityType: 'Order', relatedEntityId: orderId });
+  await notifyDriver(driverId, 'Orders', title, subtitle, {
+    relatedEntityType: 'Order',
+    relatedEntityId: orderId,
+    data: { orderId: String(orderId), orderNumber },
+  });
+}
+
+export type DriverAccountEvent = 'active' | 'rejected' | 'suspended';
+
+const DRIVER_ACCOUNT_NOTIFICATIONS: Record<DriverAccountEvent, (reason?: string) => { title: string; subtitle: string }> = {
+  active: () => ({ title: 'Application approved', subtitle: 'Your rider account is verified and active. Go online to start receiving orders.' }),
+  rejected: (reason) => ({ title: 'Application rejected', subtitle: reason || 'Your registration was not approved.' }),
+  suspended: (reason) => ({ title: 'Account suspended', subtitle: reason || 'Your account has been suspended. Contact support for help.' }),
+};
+
+export async function notifyDriverAccountEvent(driverId: unknown, event: DriverAccountEvent, reason?: string) {
+  const { title, subtitle } = DRIVER_ACCOUNT_NOTIFICATIONS[event](reason);
+  await notifyDriver(driverId, 'Account', title, subtitle, { relatedEntityType: 'Driver', relatedEntityId: driverId });
 }

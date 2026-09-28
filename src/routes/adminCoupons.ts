@@ -17,5 +17,18 @@ adminCouponRouter.post(
   handleValidation,
   asyncHandler(ctrl.createCoupon),
 );
-adminCouponRouter.patch('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.updateCoupon));
-adminCouponRouter.delete('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.deleteCoupon));
+adminCouponRouter.patch(
+  '/:id',
+  param('id').isMongoId(),
+  body('code').optional().isString().trim().notEmpty().withMessage('Coupon code cannot be empty'),
+  body('discountType').optional().isIn(['flat', 'percent']),
+  body('value').optional().isFloat({ min: 0 }),
+  body('minOrderValue').optional().isFloat({ min: 0 }),
+  body('maxDiscount').optional({ values: 'null' }).isFloat({ min: 0 }),
+  body('expiresAt').optional({ values: 'null' }).isISO8601(),
+  body('usageLimit').optional({ values: 'null' }).isInt({ min: 0 }),
+  body('isActive').optional().isBoolean(),
+  handleValidation,
+  asyncHandler(ctrl.updateCoupon),
+);
+adminCouponRouter.delete('/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.deleteCoupon));

@@ -11,5 +11,5 @@ customerNotificationRouter.use(authenticate, authorize('customer'));
 customerNotificationRouter.get('/', asyncHandler(ctrl.listNotifications));
 customerNotificationRouter.get('/unread-count', asyncHandler(ctrl.getUnreadCount));
 customerNotificationRouter.patch('/read-all', asyncHandler(ctrl.markAllRead));
-customerNotificationRouter.get('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.getNotification));
-customerNotificationRouter.patch('/:id/read', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.markRead));
+customerNotificationRouter.get('/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.getNotification));
+customerNotificationRouter.patch('/:id/read', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.markRead));

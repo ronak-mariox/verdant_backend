@@ -72,7 +72,10 @@ export interface OrderDoc {
   placedAt: Date;
   deliveredAt?: Date;
   deliveryOtpHash?: string;
+  deliveryOtp?: string;
+  deliveryOtpAttempts?: number;
   pickupConfirmedAt?: Date;
+  vendorRating?: number;
   deliveryProofUrl?: string;
   driverEarnings?: {
     base: number;
@@ -135,7 +138,10 @@ const orderSchema = new Schema<OrderDoc>(
     placedAt: { type: Date, required: true },
     deliveredAt: Date,
     deliveryOtpHash: String,
+    deliveryOtp: String,
+    deliveryOtpAttempts: { type: Number, default: 0 },
     pickupConfirmedAt: Date,
+    vendorRating: { type: Number, min: 1, max: 5 },
     deliveryProofUrl: String,
     driverEarnings: { type: Schema.Types.Mixed },
   },

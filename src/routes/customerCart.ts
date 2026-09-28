@@ -12,7 +12,7 @@ customerCartRouter.get('/', asyncHandler(ctrl.getCart));
 
 customerCartRouter.post(
   '/items',
-  body('productId').isString().notEmpty(),
+  body('productId').isMongoId(),
   body('variantId').isString().notEmpty(),
   body('quantity').optional().isInt({ min: 1 }),
   handleValidation,
@@ -21,7 +21,7 @@ customerCartRouter.post(
 
 customerCartRouter.patch(
   '/items/:productId/:variantId',
-  param('productId').isString().notEmpty(),
+  param('productId').isMongoId(),
   param('variantId').isString().notEmpty(),
   body('quantity').isInt({ min: 0 }),
   handleValidation,

@@ -7,16 +7,35 @@ import { DriverOrderResponse } from '../models/DriverOrderResponse';
 import { DeliveryIssue, type DeliveryIssueType } from '../models/DeliveryIssue';
 import { EarningsLedger } from '../models/EarningsLedger';
 import { HttpError } from '../lib/httpError';
-import { toSafeJson } from '../lib/sanitize';
-import { canTransition } from '../lib/orderStatus';
+import { arrayPagination, toSafeJson } from '../lib/sanitize';
+import { applyReassignment, canTransition } from '../lib/orderStatus';
+import { releaseOrderResources } from '../lib/orderStock';
 import { notifyOrderStatusChange } from '../lib/notify';
+import { notifyVendor } from '../lib/vendorNotify';
 import { createDeliveryOtp, compareDeliveryOtp } from '../lib/otp';
 import { computeDeliveryEarnings, getDriverBalance } from '../lib/driverEarnings';
 import { updateIncentiveProgress } from '../lib/incentives';
 import { recordVendorSettlement } from '../lib/commission';
 import { createTicketFromDeliveryIssue } from '../lib/supportTickets';
+import { publicUrlFor } from '../lib/upload';
 import { haversineKm } from '../lib/geo';
 import { env } from '../lib/env';
+
+const DRIVER_OMIT = ['deliveryOtpHash', 'deliveryOtp', 'deliveryOtpAttempts'];
+const MAX_DELIVERY_OTP_ATTEMPTS = 5;
+
+/** Pending/unapproved riders can register and look around, but never touch orders. */
+async function requireActiveDriver(driverId: string, opts: { online?: boolean } = {}) {
+  const driver = await Driver.findById(driverId);
+  if (!driver) throw new HttpError(404, 'Driver not found');
+  if (driver.status !== 'active') {
+    throw new HttpError(403, 'Your rider account must be approved before you can take orders', { reason: 'driver_not_active', status: driver.status });
+  }
+  if (opts.online && !driver.isOnline) {
+    throw new HttpError(403, 'Go online to accept orders', { reason: 'driver_offline' });
+  }
+  return driver;
+}
 
 /** The driver app's order UI expects the pickup store's name/address/phone/location
  * inline on each order — Order only stores vendorId, so batch-join Vendor here rather
@@ -34,7 +53,7 @@ async function withPickupInfo(orders: HydratedDocument<OrderDoc>[]) {
       : undefined;
 
     return {
-      ...toSafeJson(o, ['deliveryOtpHash']),
+      ...toSafeJson(o, DRIVER_OMIT),
       pickup: {
         name: vendor?.storeProfile?.storeName ?? vendor?.businessInfo?.displayName ?? 'Store',
         phone: addr?.contactNumber ?? vendor?.phone,
@@ -47,11 +66,12 @@ async function withPickupInfo(orders: HydratedDocument<OrderDoc>[]) {
 }
 
 export async function listAvailableOrders(req: Request, res: Response) {
-  const orders = await Order.find({ status: 'ready_for_pickup', driverId: null }).sort({ placedAt: 1 });
+  const driver = await requireActiveDriver(req.user!.id);
+  const rejectedOrderIds = await DriverOrderResponse.distinct('orderId', { driverId: driver._id as never, response: 'rejected' });
+  const orders = await Order.find({ status: 'ready_for_pickup', driverId: null, _id: { $nin: rejectedOrderIds } }).sort({ placedAt: 1 });
   const withInfo = await withPickupInfo(orders);
 
-  const driver = await Driver.findById(req.user!.id);
-  const from = driver?.currentLocation;
+  const from = driver.currentLocation;
   if (from) {
     withInfo.sort((a, b) => {
       const pa = (a as { pickup: { latitude?: number; longitude?: number } }).pickup;
@@ -66,6 +86,7 @@ export async function listAvailableOrders(req: Request, res: Response) {
 }
 
 export async function acceptOrder(req: Request, res: Response) {
+  await requireActiveDriver(req.user!.id, { online: true });
   const order = await Order.findOneAndUpdate(
     { _id: req.params.id, status: 'ready_for_pickup', driverId: null },
     { $set: { driverId: req.user!.id } },
@@ -80,8 +101,12 @@ export async function acceptOrder(req: Request, res: Response) {
 }
 
 export async function rejectOrder(req: Request, res: Response) {
+  await requireActiveDriver(req.user!.id);
   const order = await Order.findById(req.params.id);
   if (!order) throw new HttpError(404, 'Order not found');
+  if (order.status !== 'ready_for_pickup' || order.driverId) {
+    throw new HttpError(409, 'This order is no longer available to reject');
+  }
 
   await DriverOrderResponse.create({
     driverId: req.user!.id,
@@ -94,6 +119,7 @@ export async function rejectOrder(req: Request, res: Response) {
 }
 
 export async function confirmPickup(req: Request, res: Response) {
+  await requireActiveDriver(req.user!.id);
   const order = await Order.findOne({ _id: req.params.id, driverId: req.user!.id });
   if (!order) throw new HttpError(404, 'Order not found');
   if (!canTransition(order.status, 'out_for_delivery', 'driver')) {
@@ -101,75 +127,105 @@ export async function confirmPickup(req: Request, res: Response) {
   }
 
   const now = new Date();
-  const { hash, devOtp } = await createDeliveryOtp();
+  const { code, hash, devOtp } = await createDeliveryOtp();
 
   order.pickupConfirmedAt = now;
   order.deliveryOtpHash = hash;
+  // Dummy OTP flow (no SMS provider): the plaintext is kept so the customer app
+  // can display it for the rider to check against.
+  order.deliveryOtp = code;
+  order.deliveryOtpAttempts = 0;
   order.status = 'out_for_delivery';
   order.statusHistory.push({ status: 'out_for_delivery', at: now });
   await order.save();
 
-  await notifyOrderStatusChange(order.customerId, order._id, order.orderNumber, 'out_for_delivery');
+  await notifyOrderStatusChange(order, 'out_for_delivery');
 
   const [withInfo] = await withPickupInfo([order]);
   res.json(env.isProd ? withInfo : { ...withInfo, devOtp });
 }
 
 export async function verifyDeliveryOtp(req: Request, res: Response) {
+  await requireActiveDriver(req.user!.id);
   const order = await Order.findOne({ _id: req.params.id, driverId: req.user!.id });
   if (!order) throw new HttpError(404, 'Order not found');
   if (order.status !== 'out_for_delivery' || !order.deliveryOtpHash) {
     throw new HttpError(409, 'This order is not awaiting delivery confirmation');
   }
+  if ((order.deliveryOtpAttempts ?? 0) >= MAX_DELIVERY_OTP_ATTEMPTS) {
+    throw new HttpError(429, 'Too many incorrect OTP attempts — contact support to complete this delivery', {
+      reason: 'otp_attempts_exceeded',
+    });
+  }
 
   const { otp } = req.body as { otp: string };
   const matches = await compareDeliveryOtp(otp, order.deliveryOtpHash);
-  if (!matches) throw new HttpError(422, 'Incorrect OTP');
-
-  if (!canTransition(order.status, 'delivered', 'driver')) {
-    throw new HttpError(409, `Cannot mark delivered from status "${order.status}"`);
+  if (!matches) {
+    await Order.updateOne({ _id: order._id }, { $inc: { deliveryOtpAttempts: 1 } });
+    const remaining = MAX_DELIVERY_OTP_ATTEMPTS - (order.deliveryOtpAttempts ?? 0) - 1;
+    throw new HttpError(422, 'Incorrect OTP', { attemptsRemaining: Math.max(remaining, 0) });
   }
 
   const now = new Date();
   const breakdown = await computeDeliveryEarnings(order);
 
-  for (const [type, amount] of [
-    ['delivery_fee', breakdown.base],
-    ['distance_bonus', breakdown.distance],
-    ['ontime_bonus', breakdown.onTimeBonus],
-  ] as const) {
-    if (amount <= 0) continue;
-    const balanceAfter = (await getDriverBalance(req.user!.id)) + amount;
-    await EarningsLedger.create({
-      driverId: req.user!.id as never,
-      orderId: order._id as never,
-      type,
-      amount,
-      balanceAfter,
-      status: 'pending',
-      reason: `Order #${order.orderNumber}`,
-    });
+  // Mark delivered first and atomically — if two requests race, only one gets
+  // past this point and writes the money rows.
+  const delivered = await Order.findOneAndUpdate(
+    { _id: order._id, driverId: req.user!.id, status: 'out_for_delivery' },
+    {
+      $set: {
+        status: 'delivered',
+        deliveredAt: now,
+        paymentStatus: 'paid',
+        driverEarnings: { base: breakdown.base, distance: breakdown.distance, onTimeBonus: breakdown.onTimeBonus, incentiveBonus: 0, total: breakdown.total },
+      },
+      $unset: { deliveryOtpHash: 1, deliveryOtp: 1 },
+      $push: { statusHistory: { status: 'delivered', at: now } },
+    },
+    { new: true },
+  );
+  if (!delivered) throw new HttpError(409, 'This order was already completed');
+
+  const alreadyLedgered = await EarningsLedger.exists({ driverId: req.user!.id, orderId: delivered._id as never, type: 'delivery_fee' });
+  let incentiveBonus = 0;
+  if (!alreadyLedgered) {
+    for (const [type, amount] of [
+      ['delivery_fee', breakdown.base],
+      ['distance_bonus', breakdown.distance],
+      ['ontime_bonus', breakdown.onTimeBonus],
+    ] as const) {
+      if (amount <= 0) continue;
+      const balanceAfter = (await getDriverBalance(req.user!.id)) + amount;
+      await EarningsLedger.create({
+        driverId: req.user!.id as never,
+        orderId: delivered._id as never,
+        type,
+        amount,
+        balanceAfter,
+        status: 'pending',
+        reason: `Order #${delivered.orderNumber}`,
+      });
+    }
+
+    incentiveBonus = await updateIncentiveProgress(req.user!.id, delivered);
+    if (incentiveBonus > 0) {
+      delivered.driverEarnings = { ...delivered.driverEarnings!, incentiveBonus, total: breakdown.total + incentiveBonus };
+      await Order.updateOne({ _id: delivered._id }, { $set: { driverEarnings: delivered.driverEarnings } });
+    }
   }
 
-  const incentiveBonus = await updateIncentiveProgress(req.user!.id, order);
+  await recordVendorSettlement(delivered);
+  await notifyOrderStatusChange(delivered, 'delivered');
+  await notifyVendor(
+    delivered.vendorId,
+    'payment',
+    'Payment Received',
+    `Order #${delivered.orderNumber} · ₹${delivered.pricing.grandTotal}`,
+    { orderId: delivered._id, orderNumber: delivered.orderNumber },
+  );
 
-  order.status = 'delivered';
-  order.deliveredAt = now;
-  order.statusHistory.push({ status: 'delivered', at: now });
-  order.deliveryOtpHash = undefined;
-  order.driverEarnings = {
-    base: breakdown.base,
-    distance: breakdown.distance,
-    onTimeBonus: breakdown.onTimeBonus,
-    incentiveBonus,
-    total: breakdown.total + incentiveBonus,
-  };
-  await order.save();
-  await recordVendorSettlement(order);
-
-  await notifyOrderStatusChange(order.customerId, order._id, order.orderNumber, 'delivered');
-
-  const [withInfo] = await withPickupInfo([order]);
+  const [withInfo] = await withPickupInfo([delivered]);
   res.json(withInfo);
 }
 
@@ -199,21 +255,33 @@ export async function reportIssue(req: Request, res: Response) {
 
   const now = new Date();
   if (CANCEL_ISSUE_TYPES.includes(type) && canTransition(order.status, 'cancelled', 'driver')) {
+    await releaseOrderResources(order);
     order.status = 'cancelled';
     order.cancelledBy = 'driver';
     order.cancelReason = description ?? type;
     order.statusHistory.push({ status: 'cancelled', at: now, note: description });
-    order.driverId = undefined;
+    order.deliveryOtpHash = undefined;
+    order.deliveryOtp = undefined;
     await order.save();
-    await notifyOrderStatusChange(order.customerId, order._id, order.orderNumber, 'cancelled', description);
+    await notifyOrderStatusChange(order, 'cancelled', description);
+    await notifyVendor(
+      order.vendorId,
+      'order-cancellation',
+      `Order #${order.orderNumber} Cancelled`,
+      description ? `Delivery failed · ${description}` : 'Delivery failed',
+      { orderId: order._id, orderNumber: order.orderNumber },
+    );
   } else if (UNASSIGN_ISSUE_TYPES.includes(type)) {
-    order.driverId = undefined;
-    order.status = 'ready_for_pickup';
-    order.statusHistory.push({ status: 'ready_for_pickup', at: now, note: `Reassigned after driver reported ${type}` });
+    applyReassignment(order, 'driver', `Reassigned after driver reported ${type}`);
     await order.save();
   }
 
-  res.status(201).json({ issue: toSafeJson(issue), order: toSafeJson(order, ['deliveryOtpHash']) });
+  res.status(201).json({ issue: toSafeJson(issue), order: toSafeJson(order, DRIVER_OMIT) });
+}
+
+export async function uploadEvidence(req: Request, res: Response) {
+  if (!req.file) throw new HttpError(400, 'No file uploaded — field name must be "file"');
+  res.status(201).json({ url: publicUrlFor(req.file.filename) });
 }
 
 export async function listActiveOrders(req: Request, res: Response) {
@@ -233,7 +301,8 @@ const HISTORY_TABS: Record<string, OrderStatus[]> = {
 export async function listOrderHistory(req: Request, res: Response) {
   const tab = (req.query.tab as string) || 'all';
   const statuses = HISTORY_TABS[tab] ?? HISTORY_TABS.all;
-  const orders = await Order.find({ driverId: req.user!.id, status: { $in: statuses } }).sort({ createdAt: -1 });
+  const { skip, limit } = arrayPagination(req.query as Record<string, unknown>);
+  const orders = await Order.find({ driverId: req.user!.id, status: { $in: statuses } }).sort({ createdAt: -1 }).skip(skip).limit(limit);
   res.json(await withPickupInfo(orders));
 }
 

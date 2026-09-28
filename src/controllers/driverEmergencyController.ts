@@ -3,8 +3,9 @@ import { Order } from '../models/Order';
 import { EmergencyIncident, type EmergencyIncidentType } from '../models/EmergencyIncident';
 import { LocationShare } from '../models/LocationShare';
 import { EarningsLedger } from '../models/EarningsLedger';
-import { getDriverBalance } from '../lib/driverEarnings';
+import { DRIVER_BASE_PAY, getDriverBalance } from '../lib/driverEarnings';
 import { notifyDriver } from '../lib/driverNotify';
+import { applyReassignment } from '../lib/orderStatus';
 import { toSafeJson } from '../lib/sanitize';
 import { HttpError } from '../lib/httpError';
 
@@ -37,12 +38,10 @@ async function createIncidentAndReassign(driverId: string, input: IncidentInput)
   });
 
   let earningsProtectedAmount = 0;
-  if (order && order.status !== 'delivered' && order.status !== 'cancelled') {
-    earningsProtectedAmount = order.pricing.deliveryFee ?? 0;
+  if (order && (order.status === 'ready_for_pickup' || order.status === 'out_for_delivery')) {
+    earningsProtectedAmount = DRIVER_BASE_PAY;
 
-    order.driverId = undefined;
-    order.status = 'ready_for_pickup';
-    order.statusHistory.push({ status: 'ready_for_pickup', at: new Date(), note: `Reassigned after driver emergency (${input.type})` });
+    applyReassignment(order, 'driver', `Reassigned after driver emergency (${input.type})`);
     await order.save();
 
     if (earningsProtectedAmount > 0) {
@@ -149,10 +148,12 @@ export async function stopSharing(req: Request, res: Response) {
 
 export async function contactSupport(req: Request, res: Response) {
   const { message, orderId } = req.body as { message: string; orderId?: string };
+  const order = orderId ? await Order.findOne({ _id: orderId, driverId: req.user!.id }).select('orderNumber') : null;
 
   await notifyDriver(req.user!.id, 'Account', 'Support request received', message, {
-    relatedEntityType: orderId ? 'Order' : undefined,
-    relatedEntityId: orderId,
+    relatedEntityType: order ? 'Order' : undefined,
+    relatedEntityId: order?._id,
+    data: order ? { orderId: String(order._id), orderNumber: order.orderNumber } : undefined,
   });
 
   res.status(201).json({ ok: true });

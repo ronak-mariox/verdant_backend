@@ -6,6 +6,7 @@ import { toSafeJson } from '../lib/sanitize';
 import { signPurposeToken, verifyPurposeToken } from '../lib/jwt';
 import { publicUrlFor } from '../lib/upload';
 import { HttpError } from '../lib/httpError';
+import { restrictedBody } from '../lib/accountStatus';
 
 export async function requestOtp(req: Request, res: Response) {
   const phone = req.body.phone as string;
@@ -37,7 +38,7 @@ export async function verifyOtp(req: Request, res: Response) {
   }
 
   if (customer.status === 'blocked') {
-    res.status(403).json({ error: 'This account has been blocked. Contact support for help.' });
+    res.status(403).json(restrictedBody('customer', customer.status));
     return;
   }
 

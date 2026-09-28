@@ -42,6 +42,39 @@ export interface DriverBankDetailsData {
 
 export type DriverDocumentType = 'license_front' | 'license_back' | 'rc' | 'insurance';
 
+/** Everything an admin verifies one by one before approving a driver. */
+export const DRIVER_REVIEW_KEYS = [
+  'profile_photo',
+  'license_front',
+  'license_back',
+  'rc',
+  'insurance',
+  'personal_info',
+  'vehicle_details',
+  'insurance_details',
+  'bank_details',
+] as const;
+
+export type DriverReviewKey = (typeof DRIVER_REVIEW_KEYS)[number];
+
+export const DRIVER_REVIEW_LABELS: Record<DriverReviewKey, string> = {
+  profile_photo: 'Profile photo',
+  license_front: 'Driving licence (front)',
+  license_back: 'Driving licence (back)',
+  rc: 'Vehicle RC',
+  insurance: 'Insurance document',
+  personal_info: 'Personal details',
+  vehicle_details: 'Vehicle details',
+  insurance_details: 'Insurance details',
+  bank_details: 'Bank details',
+};
+
+export interface DriverItemReview {
+  status: 'verified' | 'rejected';
+  note?: string;
+  reviewedAt: Date;
+}
+
 export interface DriverDoc {
   _id: unknown;
   phone: string;
@@ -64,6 +97,8 @@ export interface DriverDoc {
   insuranceDetails?: InsuranceDetailsData;
   bankDetails?: DriverBankDetailsData;
 
+  /** Per-item admin verdicts; a missing key means "not reviewed yet". */
+  reviews?: Partial<Record<DriverReviewKey, DriverItemReview>>;
   rejectionReason?: string;
 
   isOnline: boolean;
@@ -94,6 +129,7 @@ const driverSchema = new Schema<DriverDoc>(
     documents: { type: Schema.Types.Mixed },
     insuranceDetails: { type: Schema.Types.Mixed },
     bankDetails: { type: Schema.Types.Mixed },
+    reviews: { type: Schema.Types.Mixed, default: {} },
 
     rejectionReason: String,
 

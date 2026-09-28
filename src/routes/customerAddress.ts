@@ -42,15 +42,15 @@ customerAddressRouter.get('/', asyncHandler(ctrl.listAddresses));
 customerAddressRouter.post('/', ...createAddressValidators, handleValidation, asyncHandler(ctrl.createAddress));
 customerAddressRouter.patch(
   '/:id',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   ...updateAddressValidators,
   handleValidation,
   asyncHandler(ctrl.updateAddress),
 );
-customerAddressRouter.delete('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.deleteAddress));
+customerAddressRouter.delete('/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.deleteAddress));
 customerAddressRouter.patch(
   '/:id/default',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   handleValidation,
   asyncHandler(ctrl.setDefaultAddress),
 );

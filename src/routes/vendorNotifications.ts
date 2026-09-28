@@ -18,5 +18,5 @@ vendorNotificationRouter.patch(
   asyncHandler(ctrl.markUnread),
 );
 vendorNotificationRouter.delete('/', asyncHandler(ctrl.clearAll));
-vendorNotificationRouter.patch('/:id/read', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.markRead));
-vendorNotificationRouter.delete('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.dismissNotification));
+vendorNotificationRouter.patch('/:id/read', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.markRead));
+vendorNotificationRouter.delete('/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.dismissNotification));

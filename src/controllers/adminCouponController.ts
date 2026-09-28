@@ -31,7 +31,13 @@ export async function updateCoupon(req: Request, res: Response) {
   const coupon = await Coupon.findById(req.params.id);
   if (!coupon) throw new HttpError(404, 'Coupon not found');
 
-  const { description, discountType, value, minOrderValue, maxDiscount, expiresAt, usageLimit, isActive } = req.body;
+  const { code, description, discountType, value, minOrderValue, maxDiscount, expiresAt, usageLimit, isActive } = req.body;
+  if (code !== undefined) {
+    const nextCode = String(code).trim().toUpperCase();
+    const clash = await Coupon.findOne({ code: nextCode, _id: { $ne: coupon._id } });
+    if (clash) throw new HttpError(409, 'A coupon with this code already exists');
+    coupon.code = nextCode;
+  }
   Object.assign(coupon, {
     ...(description !== undefined && { description }),
     ...(discountType !== undefined && { discountType }),

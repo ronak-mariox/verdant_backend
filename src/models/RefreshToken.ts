@@ -25,5 +25,6 @@ const refreshTokenSchema = new Schema<RefreshTokenDoc>(
 );
 
 refreshTokenSchema.index({ userId: 1, role: 1 });
+refreshTokenSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 export const RefreshToken = model<RefreshTokenDoc>('RefreshToken', refreshTokenSchema);

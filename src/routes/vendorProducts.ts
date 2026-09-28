@@ -4,14 +4,11 @@ import { handleValidation } from '../middleware/validate';
 import { authenticate, authorize } from '../middleware/auth';
 import { upload } from '../lib/upload';
 import { asyncHandler } from '../utils/asyncHandler';
+import { productBodyValidators } from './productValidators';
 import * as ctrl from '../controllers/vendorProductController';
 
 export const vendorProductRouter = Router();
 vendorProductRouter.use(authenticate, authorize('vendor'));
-
-const variantValidator = body('variants')
-  .isArray({ min: 1 })
-  .withMessage('At least one variant is required');
 
 vendorProductRouter.get('/', asyncHandler(ctrl.listMyProducts));
 
@@ -23,22 +20,21 @@ vendorProductRouter.post(
 
 vendorProductRouter.get('/stock-history', asyncHandler(ctrl.getStockHistory));
 
-vendorProductRouter.post(
-  '/',
-  body('categoryId').isString().notEmpty().withMessage('Select a category'),
-  body('name').isString().trim().notEmpty().withMessage('Product name is required'),
-  variantValidator,
+vendorProductRouter.post('/', ...productBodyValidators('create'), handleValidation, asyncHandler(ctrl.createProduct));
+
+vendorProductRouter.get('/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.getMyProduct));
+
+vendorProductRouter.patch(
+  '/:id',
+  param('id').isMongoId(),
+  ...productBodyValidators('update'),
   handleValidation,
-  asyncHandler(ctrl.createProduct),
+  asyncHandler(ctrl.updateProduct),
 );
-
-vendorProductRouter.get('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.getMyProduct));
-
-vendorProductRouter.patch('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.updateProduct));
 
 vendorProductRouter.patch(
   '/:id/stock',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   body('variantId').isString().notEmpty(),
   body('stock').isInt({ min: 0 }),
   body('reason').optional().isString().trim(),
@@ -50,10 +46,10 @@ vendorProductRouter.patch(
 
 vendorProductRouter.patch(
   '/:id/availability',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   body('isAvailable').isBoolean(),
   handleValidation,
   asyncHandler(ctrl.setAvailability),
 );
 
-vendorProductRouter.delete('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.deleteProduct));
+vendorProductRouter.delete('/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.deleteProduct));

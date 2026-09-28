@@ -111,14 +111,14 @@ vendorRegistrationRouter.patch(
   asyncHandler(ctrl.savePanDetails),
 );
 
-// backUrl is intentionally optional — BusinessProofScreen's own UI labels the
-// back-side upload "(optional)"; every other field on this step is required.
+// backUrl and expiryDate are optional — some business proofs (e.g. shop
+// registration) never expire, and the back-side upload is labelled optional.
 vendorRegistrationRouter.patch(
   '/business-proof',
   body('documentType').isString().trim().notEmpty().withMessage('Document type is required'),
   body('documentNumber').isString().trim().notEmpty().withMessage('Document number is required'),
   body('issueDate').isISO8601().withMessage('Issue date is required'),
-  body('expiryDate').isISO8601().withMessage('Expiry date is required'),
+  body('expiryDate').optional({ values: 'falsy' }).isISO8601().withMessage('Expiry date must be a valid date'),
   body('frontUrl').isString().trim().notEmpty().withMessage('Front-side document upload is required'),
   body('backUrl').optional({ values: 'falsy' }).isString(),
   handleValidation,

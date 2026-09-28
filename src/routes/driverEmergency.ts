@@ -13,7 +13,7 @@ const INCIDENT_TYPES = ['accident', 'medical', 'harassment', 'theft', 'vehicle_b
 driverEmergencyRouter.post(
   '/activate',
   body('type').isIn(INCIDENT_TYPES),
-  body('orderId').optional().isString(),
+  body('orderId').optional({ values: 'falsy' }).isMongoId(),
   body('description').optional().isString().trim(),
   body('medicalNeeded').optional().isBoolean(),
   body('lat').optional().isFloat(),
@@ -25,10 +25,11 @@ driverEmergencyRouter.post(
 driverEmergencyRouter.post(
   '/incidents',
   body('type').isIn(INCIDENT_TYPES),
-  body('orderId').optional().isString(),
+  body('orderId').optional({ values: 'falsy' }).isMongoId(),
   body('description').optional().isString().trim(),
   body('medicalNeeded').optional().isBoolean(),
   body('evidenceUrls').optional().isArray(),
+  body('evidenceUrls.*').isString().trim().notEmpty(),
   body('lat').optional().isFloat(),
   body('lng').optional().isFloat(),
   handleValidation,
@@ -37,7 +38,7 @@ driverEmergencyRouter.post(
 
 driverEmergencyRouter.get(
   '/incidents/:id',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   handleValidation,
   asyncHandler(ctrl.getIncidentById),
 );
@@ -47,8 +48,8 @@ driverEmergencyRouter.post(
   body('lat').isFloat(),
   body('lng').isFloat(),
   body('accuracy').optional().isFloat(),
-  body('orderId').optional().isString(),
-  body('incidentId').optional().isString(),
+  body('orderId').optional({ values: 'falsy' }).isMongoId(),
+  body('incidentId').optional({ values: 'falsy' }).isMongoId(),
   handleValidation,
   asyncHandler(ctrl.shareLocation),
 );
@@ -58,7 +59,7 @@ driverEmergencyRouter.post('/stop-sharing', asyncHandler(ctrl.stopSharing));
 driverEmergencyRouter.post(
   '/support-contact',
   body('message').isString().trim().notEmpty(),
-  body('orderId').optional().isString(),
+  body('orderId').optional({ values: 'falsy' }).isMongoId(),
   handleValidation,
   asyncHandler(ctrl.contactSupport),
 );

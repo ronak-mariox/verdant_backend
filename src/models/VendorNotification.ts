@@ -21,6 +21,7 @@ export interface VendorNotificationDoc {
   subtitle: string;
   isRead: boolean;
   orderId?: Types.ObjectId;
+  orderNumber?: string;
   productId?: Types.ObjectId;
   productName?: string;
   createdAt: Date;
@@ -51,6 +52,7 @@ const vendorNotificationSchema = new Schema<VendorNotificationDoc>(
     subtitle: { type: String, required: true },
     isRead: { type: Boolean, default: false },
     orderId: { type: Schema.Types.ObjectId, ref: 'Order' },
+    orderNumber: String,
     productId: { type: Schema.Types.ObjectId, ref: 'Product' },
     productName: String,
   },

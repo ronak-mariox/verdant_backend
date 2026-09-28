@@ -2,15 +2,25 @@ import type { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { Admin } from '../models/Admin';
 import { Vendor, type RegistrationStepKey } from '../models/Vendor';
-import { Driver } from '../models/Driver';
+import { Driver, DRIVER_REVIEW_KEYS, DRIVER_REVIEW_LABELS, type DriverDoc, type DriverReviewKey } from '../models/Driver';
 import { Customer } from '../models/Customer';
 import { Order } from '../models/Order';
 import { Product } from '../models/Product';
 import { VendorSettlement } from '../models/VendorSettlement';
 import { issueTokenPair } from '../lib/tokens';
-import { toSafeJson } from '../lib/sanitize';
+import { arrayPagination, escapeRegex, toSafeJson } from '../lib/sanitize';
 import { notifyVendor } from '../lib/vendorNotify';
+import { notifyDriver, notifyDriverAccountEvent } from '../lib/driverNotify';
 import { HttpError } from '../lib/httpError';
+
+/** Approval verifies KYC, rejection rejects it, suspension leaves it untouched —
+ * a suspended-then-reinstated account shouldn't need re-verification. */
+function kycStatusFor(status: 'active' | 'rejected' | 'suspended', explicit?: string) {
+  if (explicit) return explicit;
+  if (status === 'active') return 'verified';
+  if (status === 'rejected') return 'rejected';
+  return undefined;
+}
 
 export async function login(req: Request, res: Response) {
   const admin = await Admin.findOne({ email: req.body.email });
@@ -34,13 +44,22 @@ export async function getPendingVendors(_req: Request, res: Response) {
   res.json(vendors.map((v) => toSafeJson(v, ['passwordHash'])));
 }
 
+/** An account can only be approved once its owner has finished and submitted the registration for review. */
+function assertApprovable(status: string, account: { registrationStep?: string } | null, label: string) {
+  if (status === 'active' && account && account.registrationStep !== 'submitted') {
+    throw new HttpError(409, `This ${label} hasn't submitted their registration yet, so there is nothing to approve`);
+  }
+}
+
 export async function updateVendorStatus(req: Request, res: Response) {
+  const kycStatus = kycStatusFor(req.body.status, req.body.kycStatus);
+  assertApprovable(req.body.status, await Vendor.findById(String(req.params.id)).select('registrationStep'), 'vendor');
   const vendor = await Vendor.findByIdAndUpdate(
     String(req.params.id),
     {
       $set: {
         status: req.body.status,
-        kycStatus: req.body.kycStatus ?? (req.body.status === 'active' ? 'verified' : 'rejected'),
+        ...(kycStatus ? { kycStatus } : {}),
         rejectionReason: req.body.rejectionReason ?? null,
       },
     },
@@ -56,6 +75,13 @@ export async function updateVendorStatus(req: Request, res: Response) {
       'kyc-status',
       'Application Rejected',
       req.body.rejectionReason || 'Your registration was not approved.',
+    );
+  } else if (req.body.status === 'suspended') {
+    await notifyVendor(
+      vendor._id,
+      'kyc-status',
+      'Account Suspended',
+      req.body.rejectionReason || 'Your account has been suspended. Contact support for help.',
     );
   }
 
@@ -156,23 +182,71 @@ export async function getVendorSettlements(req: Request, res: Response) {
 
 export async function getPendingDrivers(_req: Request, res: Response) {
   const drivers = await Driver.find({ status: 'pending', registrationStep: 'submitted' }).sort({ updatedAt: -1 });
-  res.json(drivers);
+  res.json(drivers.map((d) => toSafeJson(d)));
+}
+
+/** Verify or reject one document/section of a driver's application, ahead of the overall approve/reject. */
+export async function updateDriverItemReview(req: Request, res: Response) {
+  const key = req.params.key as DriverReviewKey;
+  const { status, note } = req.body as { status: 'pending' | 'verified' | 'rejected'; note?: string };
+
+  const driver = await Driver.findById(String(req.params.id));
+  if (!driver) throw new HttpError(404, 'Driver not found');
+
+  const reviews = { ...(driver.reviews ?? {}) };
+  if (status === 'pending') delete reviews[key];
+  else reviews[key] = { status, note: status === 'rejected' ? note?.trim() : undefined, reviewedAt: new Date() };
+  driver.reviews = reviews;
+  driver.markModified('reviews');
+  await driver.save();
+
+  if (status === 'rejected') {
+    await notifyDriver(driver._id, 'Account', `${DRIVER_REVIEW_LABELS[key]} needs attention`, note?.trim() || 'Please update it and resubmit.', {
+      relatedEntityType: 'Driver',
+      relatedEntityId: driver._id,
+      data: { reviewKey: key },
+    });
+  }
+
+  res.json(toSafeJson(driver));
+}
+
+function rejectedReviewSummary(driver: { reviews?: DriverDoc['reviews'] }): string[] {
+  return DRIVER_REVIEW_KEYS.filter((key) => driver.reviews?.[key]?.status === 'rejected').map((key) => {
+    const note = driver.reviews?.[key]?.note;
+    return note ? `${DRIVER_REVIEW_LABELS[key]}: ${note}` : DRIVER_REVIEW_LABELS[key];
+  });
 }
 
 export async function updateDriverStatus(req: Request, res: Response) {
+  const kycStatus = kycStatusFor(req.body.status, req.body.kycStatus);
+  const current = await Driver.findById(String(req.params.id)).select('registrationStep reviews');
+  assertApprovable(req.body.status, current, 'driver');
+  const rejected = current ? rejectedReviewSummary(current) : [];
+  if (req.body.status === 'active' && rejected.length > 0) {
+    throw new HttpError(409, `Resolve the rejected items before approving: ${rejected.join('; ')}`);
+  }
+  // A rejection without its own reason tells the driver exactly which items to fix.
+  if (req.body.status === 'rejected' && !req.body.rejectionReason && rejected.length > 0) {
+    req.body.rejectionReason = rejected.join('; ');
+  }
   const driver = await Driver.findByIdAndUpdate(
     String(req.params.id),
     {
       $set: {
         status: req.body.status,
-        kycStatus: req.body.kycStatus ?? (req.body.status === 'active' ? 'verified' : 'rejected'),
+        ...(kycStatus ? { kycStatus } : {}),
         rejectionReason: req.body.rejectionReason ?? null,
+        ...(req.body.status !== 'active' ? { isOnline: false } : {}),
       },
     },
     { new: true },
   );
   if (!driver) throw new HttpError(404, 'Driver not found');
-  res.json(driver);
+
+  await notifyDriverAccountEvent(driver._id, req.body.status, req.body.rejectionReason);
+
+  res.json(toSafeJson(driver));
 }
 
 // ---------------------------------------------------------------------------
@@ -185,13 +259,11 @@ export async function getAllVendors(req: Request, res: Response) {
   const filter: Record<string, unknown> = {};
   if (status) filter.status = status;
   if (search) {
-    filter.$or = [
-      { fullName: { $regex: search, $options: 'i' } },
-      { 'businessInfo.displayName': { $regex: search, $options: 'i' } },
-      { phone: { $regex: search, $options: 'i' } },
-    ];
+    const pattern = { $regex: escapeRegex(search), $options: 'i' };
+    filter.$or = [{ fullName: pattern }, { 'businessInfo.displayName': pattern }, { 'storeProfile.storeName': pattern }, { phone: pattern }];
   }
-  const vendors = await Vendor.find(filter).sort({ createdAt: -1 });
+  const { skip, limit } = arrayPagination(req.query as Record<string, unknown>);
+  const vendors = await Vendor.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit);
   res.json(vendors.map((v) => toSafeJson(v, ['passwordHash'])));
 }
 
@@ -206,9 +278,11 @@ export async function getAllDrivers(req: Request, res: Response) {
   const filter: Record<string, unknown> = {};
   if (status) filter.status = status;
   if (search) {
-    filter.$or = [{ fullName: { $regex: search, $options: 'i' } }, { phone: { $regex: search, $options: 'i' } }];
+    const pattern = { $regex: escapeRegex(search), $options: 'i' };
+    filter.$or = [{ fullName: pattern }, { phone: pattern }];
   }
-  const drivers = await Driver.find(filter).sort({ createdAt: -1 });
+  const { skip, limit } = arrayPagination(req.query as Record<string, unknown>);
+  const drivers = await Driver.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit);
   res.json(drivers.map((d) => toSafeJson(d)));
 }
 
@@ -223,13 +297,11 @@ export async function getAllCustomers(req: Request, res: Response) {
   const filter: Record<string, unknown> = {};
   if (status) filter.status = status;
   if (search) {
-    filter.$or = [
-      { name: { $regex: search, $options: 'i' } },
-      { phone: { $regex: search, $options: 'i' } },
-      { email: { $regex: search, $options: 'i' } },
-    ];
+    const pattern = { $regex: escapeRegex(search), $options: 'i' };
+    filter.$or = [{ name: pattern }, { phone: pattern }, { email: pattern }];
   }
-  const customers = await Customer.find(filter).sort({ createdAt: -1 });
+  const { skip, limit } = arrayPagination(req.query as Record<string, unknown>);
+  const customers = await Customer.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit);
   res.json(customers.map((c) => toSafeJson(c)));
 }
 
@@ -262,6 +334,7 @@ export async function getDashboard(_req: Request, res: Response) {
     ordersByStatusRaw,
     revenueAgg,
     pendingVendors,
+    inProgressVendors,
     pendingProducts,
     totalCustomers,
     totalVendors,
@@ -271,16 +344,17 @@ export async function getDashboard(_req: Request, res: Response) {
     Order.countDocuments(),
     Order.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
     Order.aggregate([
-      { $match: { status: { $ne: 'cancelled' }, createdAt: { $gte: since30d } } },
+      { $match: { status: 'delivered', createdAt: { $gte: since30d } } },
       { $group: { _id: null, revenue: { $sum: '$pricing.grandTotal' }, orders: { $sum: 1 } } },
     ]),
     Vendor.countDocuments({ status: 'pending', registrationStep: 'submitted' }),
+    Vendor.countDocuments({ status: 'pending', registrationStep: { $ne: 'submitted' } }),
     Product.countDocuments({ status: 'pending' }),
     Customer.countDocuments(),
     Vendor.countDocuments({ status: 'active' }),
     Order.find().sort({ createdAt: -1 }).limit(10),
     Order.aggregate([
-      { $match: { status: { $ne: 'cancelled' } } },
+      { $match: { status: 'delivered' } },
       { $unwind: '$items' },
       { $lookup: { from: 'products', localField: 'items.productId', foreignField: '_id', as: 'product' } },
       { $unwind: '$product' },
@@ -299,6 +373,7 @@ export async function getDashboard(_req: Request, res: Response) {
     ordersByStatus,
     last30Days: { revenue: revenueAgg[0]?.revenue ?? 0, orders: revenueAgg[0]?.orders ?? 0 },
     pendingVendorApprovals: pendingVendors,
+    pendingVendorRegistrations: inProgressVendors,
     pendingProductApprovals: pendingProducts,
     totalCustomers,
     totalActiveVendors: totalVendors,

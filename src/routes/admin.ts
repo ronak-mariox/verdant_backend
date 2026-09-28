@@ -10,6 +10,8 @@ import { adminOrderRouter } from './adminOrders';
 import { adminCouponRouter } from './adminCoupons';
 import { adminSupportRouter } from './adminSupport';
 import { adminSettlementsRouter } from './adminSettlements';
+import { adminIncentiveRouter } from './adminIncentives';
+import { DRIVER_REVIEW_KEYS } from '../models/Driver';
 
 export const adminRouter = Router();
 
@@ -48,7 +50,7 @@ adminRouter.patch(
   '/vendors/:id/status',
   authenticate,
   authorize('admin'),
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   body('status').isIn(['active', 'rejected', 'suspended']),
   body('kycStatus').optional().isIn(['verified', 'rejected', 'pending']),
   body('rejectionReason').optional({ values: 'falsy' }).isString(),
@@ -60,7 +62,7 @@ adminRouter.patch(
   '/vendors/:id/steps/:stepKey',
   authenticate,
   authorize('admin'),
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   param('stepKey').isIn([
     'businessType',
     'businessInfo',
@@ -88,7 +90,7 @@ adminRouter.patch(
   '/bank-requests/:vendorId',
   authenticate,
   authorize('admin'),
-  param('vendorId').isString().notEmpty(),
+  param('vendorId').isMongoId(),
   body('approve').isBoolean(),
   body('note').optional({ values: 'falsy' }).isString(),
   handleValidation,
@@ -99,7 +101,7 @@ adminRouter.get(
   '/vendors/:id/settlements',
   authenticate,
   authorize('admin'),
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   handleValidation,
   asyncHandler(adminController.getVendorSettlements),
 );
@@ -112,10 +114,27 @@ adminRouter.get(
 );
 
 adminRouter.patch(
+  '/drivers/:id/reviews/:key',
+  authenticate,
+  authorize('admin'),
+  param('id').isMongoId(),
+  param('key').isIn([...DRIVER_REVIEW_KEYS]),
+  body('status').isIn(['pending', 'verified', 'rejected']),
+  body('note')
+    .if(body('status').equals('rejected'))
+    .isString()
+    .trim()
+    .notEmpty()
+    .withMessage('A reason is required when rejecting an item'),
+  handleValidation,
+  asyncHandler(adminController.updateDriverItemReview),
+);
+
+adminRouter.patch(
   '/drivers/:id/status',
   authenticate,
   authorize('admin'),
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   body('status').isIn(['active', 'rejected', 'suspended']),
   body('kycStatus').optional().isIn(['verified', 'rejected', 'pending']),
   body('rejectionReason').optional({ values: 'falsy' }).isString(),
@@ -128,18 +147,18 @@ adminRouter.patch(
 // ---------------------------------------------------------------------------
 
 adminRouter.get('/vendors', authenticate, authorize('admin'), asyncHandler(adminController.getAllVendors));
-adminRouter.get('/vendors/:id', authenticate, authorize('admin'), asyncHandler(adminController.getVendorById));
+adminRouter.get('/vendors/:id', authenticate, authorize('admin'), param('id').isMongoId(), handleValidation, asyncHandler(adminController.getVendorById));
 
 adminRouter.get('/drivers', authenticate, authorize('admin'), asyncHandler(adminController.getAllDrivers));
-adminRouter.get('/drivers/:id', authenticate, authorize('admin'), asyncHandler(adminController.getDriverById));
+adminRouter.get('/drivers/:id', authenticate, authorize('admin'), param('id').isMongoId(), handleValidation, asyncHandler(adminController.getDriverById));
 
 adminRouter.get('/customers', authenticate, authorize('admin'), asyncHandler(adminController.getAllCustomers));
-adminRouter.get('/customers/:id', authenticate, authorize('admin'), asyncHandler(adminController.getCustomerById));
+adminRouter.get('/customers/:id', authenticate, authorize('admin'), param('id').isMongoId(), handleValidation, asyncHandler(adminController.getCustomerById));
 adminRouter.patch(
   '/customers/:id/status',
   authenticate,
   authorize('admin'),
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   body('status').isIn(['active', 'blocked']),
   handleValidation,
   asyncHandler(adminController.updateCustomerStatus),
@@ -157,3 +176,4 @@ adminRouter.use('/orders', adminOrderRouter);
 adminRouter.use('/coupons', adminCouponRouter);
 adminRouter.use('/support-tickets', adminSupportRouter);
 adminRouter.use('/settlements', adminSettlementsRouter);
+adminRouter.use('/incentives', adminIncentiveRouter);

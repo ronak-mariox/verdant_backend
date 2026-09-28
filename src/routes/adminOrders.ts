@@ -9,10 +9,10 @@ export const adminOrderRouter = Router();
 adminOrderRouter.use(authenticate, authorize('admin'));
 
 adminOrderRouter.get('/', asyncHandler(ctrl.listAllOrders));
-adminOrderRouter.get('/:id', param('id').isString().notEmpty(), handleValidation, asyncHandler(ctrl.getOrderForAdmin));
+adminOrderRouter.get('/:id', param('id').isMongoId(), handleValidation, asyncHandler(ctrl.getOrderForAdmin));
 adminOrderRouter.patch(
   '/:id/status',
-  param('id').isString().notEmpty(),
+  param('id').isMongoId(),
   body('status').isIn([
     'placed',
     'accepted',

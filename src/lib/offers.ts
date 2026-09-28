@@ -17,20 +17,24 @@ export async function getActiveOffersForVendor(vendorId: string | Types.ObjectId
   }).sort({ createdAt: -1 });
 }
 
+type OfferMatchTarget = Pick<ProductDoc, '_id' | 'categoryId'>;
+
 /** Picks the best-matching offer for a product from an already-fetched active list —
- * entire-store offers match everything, selected-products offers match by category.
+ * entire-store offers match everything; selected-products offers match by the
+ * offer's explicit productIds, falling back to categoryIds when none were chosen.
  * Most recently created offer wins when more than one matches. */
-export function matchOfferForProduct(offers: OfferDoc[], product: Pick<ProductDoc, 'categoryId'>): OfferDoc | null {
+export function matchOfferForProduct(offers: OfferDoc[], product: OfferMatchTarget): OfferDoc | null {
   return (
-    offers.find(
-      (offer) =>
-        offer.scope === 'entire-store' || offer.categoryIds.some((id) => String(id) === String(product.categoryId)),
-    ) ?? null
+    offers.find((offer) => {
+      if (offer.scope === 'entire-store') return true;
+      if (offer.productIds.length > 0) return offer.productIds.some((id) => String(id) === String(product._id));
+      return offer.categoryIds.some((id) => String(id) === String(product.categoryId));
+    }) ?? null
   );
 }
 
 export async function findActiveOfferForProduct(
-  product: Pick<ProductDoc, 'vendorId' | 'categoryId'>,
+  product: Pick<ProductDoc, '_id' | 'vendorId' | 'categoryId'>,
 ): Promise<OfferDoc | null> {
   const offers = await getActiveOffersForVendor(product.vendorId);
   return matchOfferForProduct(offers, product);
@@ -87,7 +91,7 @@ export function deriveOfferStatus(offer: Pick<OfferDoc, 'isPaused' | 'startDate'
  * customer has ever placed an order with that vendor before.
  */
 export async function resolveAppliedOffers(
-  lines: { product: Pick<ProductDoc, 'vendorId' | 'categoryId'>; unitPrice: number; quantity: number }[],
+  lines: { product: Pick<ProductDoc, '_id' | 'vendorId' | 'categoryId'>; unitPrice: number; quantity: number }[],
   customerId: string,
 ): Promise<(AppliedOffer | undefined)[]> {
   if (lines.length === 0) return [];

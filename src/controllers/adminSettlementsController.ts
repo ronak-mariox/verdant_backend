@@ -5,8 +5,9 @@ import { VendorPayoutBatch } from '../models/VendorPayoutBatch';
 import { Vendor, type VendorDoc } from '../models/Vendor';
 import { Driver } from '../models/Driver';
 import { EarningsLedger } from '../models/EarningsLedger';
-import { toSafeJson } from '../lib/sanitize';
+import { objectPagination, toSafeJson } from '../lib/sanitize';
 import { HttpError } from '../lib/httpError';
+import { ensureBatchesForAllVendors } from '../lib/settlementBatches';
 
 function vendorDisplayName(v: Pick<VendorDoc, 'storeProfile' | 'businessInfo' | 'fullName' | 'phone'>): string {
   return v.storeProfile?.storeName || v.businessInfo?.displayName || v.fullName || v.phone;
@@ -79,6 +80,37 @@ export async function listDriverPayouts(_req: Request, res: Response) {
 
   summaries.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   res.json(summaries);
+}
+
+/** Weekly payout batches across all vendors — batches are (re)built from the
+ * settlement ledger on every read so the list is never stale. */
+export async function listPayoutBatches(req: Request, res: Response) {
+  await ensureBatchesForAllVendors();
+
+  const { status } = req.query as Record<string, string | undefined>;
+  const filter: Record<string, unknown> = {};
+  if (status) filter.status = status;
+  const { page, limit, skip } = objectPagination(req.query as Record<string, unknown>);
+
+  const [items, total] = await Promise.all([
+    VendorPayoutBatch.find(filter).sort({ periodStart: -1, createdAt: -1 }).skip(skip).limit(limit),
+    VendorPayoutBatch.countDocuments(filter),
+  ]);
+
+  const vendorIds = [...new Set(items.map((b) => String(b.vendorId)))];
+  const vendors = await Vendor.find({ _id: { $in: vendorIds } });
+  const nameById = new Map(vendors.map((v) => [String(v._id), vendorDisplayName(v)]));
+
+  res.json({
+    items: items.map((b) => ({
+      ...toSafeJson(b),
+      vendorName: nameById.get(String(b.vendorId)) ?? 'Unknown vendor',
+    })),
+    page,
+    limit,
+    total,
+    totalPages: Math.ceil(total / limit),
+  });
 }
 
 /** The only truthful source of a "paid" payout status — actual bank transfers to

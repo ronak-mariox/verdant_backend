@@ -1,10 +1,17 @@
 import { Schema, model } from 'mongoose';
 
+export type VariantKind = 'weight_volume' | 'attribute' | 'none';
+
+export const VARIANT_KINDS: VariantKind[] = ['weight_volume', 'attribute', 'none'];
+
 export interface CategoryVariantConfig {
-  kind: 'weight_volume' | 'attribute';
+  // 'none' = sold as a single item with no size/unit at all (e.g. earbuds).
+  kind: VariantKind;
   label: string;
   units?: string[];
   options?: string[];
+  // Lets a vendor type a value that isn't in `options` (attribute kind only).
+  allowCustom?: boolean;
 }
 
 export interface SubcategoryItem {
@@ -16,6 +23,7 @@ export interface SubcategoryItem {
   // clothing sizes while its "Watches" subcategory doesn't. Falls back to the
   // category's own variantConfig when unset.
   variantConfig?: CategoryVariantConfig;
+  variantConfigs?: CategoryVariantConfig[];
 }
 
 export interface CategoryDoc {
@@ -27,17 +35,21 @@ export interface CategoryDoc {
   isActive: boolean;
   showOnHome: boolean;
   subcategories: SubcategoryItem[];
+  // Primary variant type; kept in sync with variantConfigs[0] for older clients.
   variantConfig?: CategoryVariantConfig;
+  // Every variant type a product here may use — the vendor picks one per product.
+  variantConfigs?: CategoryVariantConfig[];
   createdAt: Date;
   updatedAt: Date;
 }
 
 const variantConfigSchema = new Schema<CategoryVariantConfig>(
   {
-    kind: { type: String, enum: ['weight_volume', 'attribute'], required: true },
+    kind: { type: String, enum: VARIANT_KINDS, required: true },
     label: { type: String, required: true, trim: true },
     units: { type: [String], default: undefined },
     options: { type: [String], default: undefined },
+    allowCustom: { type: Boolean, default: undefined },
   },
   { _id: false },
 );
@@ -49,6 +61,7 @@ const subcategorySchema = new Schema<SubcategoryItem>(
     imageUrl: String,
     isActive: { type: Boolean, default: true },
     variantConfig: { type: variantConfigSchema, required: false },
+    variantConfigs: { type: [variantConfigSchema], default: undefined },
   },
   { _id: false },
 );
@@ -63,6 +76,7 @@ const categorySchema = new Schema<CategoryDoc>(
     showOnHome: { type: Boolean, default: true },
     subcategories: { type: [subcategorySchema], default: [] },
     variantConfig: { type: variantConfigSchema, required: false },
+    variantConfigs: { type: [variantConfigSchema], default: undefined },
   },
   { timestamps: true },
 );

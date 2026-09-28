@@ -9,6 +9,8 @@ export interface NotificationDoc {
   title: string;
   body: string;
   orderId?: Types.ObjectId;
+  orderNumber?: string;
+  data?: Record<string, unknown>;
   isRead: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -21,6 +23,8 @@ const notificationSchema = new Schema<NotificationDoc>(
     title: { type: String, required: true },
     body: { type: String, required: true },
     orderId: { type: Schema.Types.ObjectId, ref: 'Order' },
+    orderNumber: String,
+    data: { type: Schema.Types.Mixed },
     isRead: { type: Boolean, default: false },
   },
   { timestamps: true },

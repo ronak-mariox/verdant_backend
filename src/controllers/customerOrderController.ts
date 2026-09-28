@@ -1,23 +1,61 @@
 import type { Request, Response } from 'express';
 import crypto from 'node:crypto';
+import type { HydratedDocument } from 'mongoose';
 import { Cart } from '../models/Cart';
 import { Product, type ProductDoc } from '../models/Product';
 import { Address } from '../models/Address';
 import { Coupon } from '../models/Coupon';
-import { Order, type OrderItemSnapshot } from '../models/Order';
+import { Order, type OrderDoc, type OrderItemSnapshot } from '../models/Order';
 import { Offer } from '../models/Offer';
 import { Rating } from '../models/Rating';
+import { Driver } from '../models/Driver';
 import { HttpError } from '../lib/httpError';
-import { toSafeJson } from '../lib/sanitize';
+import { arrayPagination, toSafeJson } from '../lib/sanitize';
 import { evaluateCoupon, computeOrderPricing, findVariant, priceLine } from '../lib/pricing';
 import { resolveAppliedOffers } from '../lib/offers';
 import { CANCELLABLE_STATUSES } from '../lib/orderStatus';
+import { releaseOrderResources } from '../lib/orderStock';
 import { notifyCustomer, notifyOrderStatusChange } from '../lib/notify';
 import { notifyVendor } from '../lib/vendorNotify';
 
 function generateOrderNumber(): string {
   const year = new Date().getFullYear();
   return `VR-${year}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+}
+
+/** The customer's view of an order: the delivery OTP (dummy — shown so they can
+ * read it to the rider) only while it's out for delivery, plus the assigned
+ * driver's contact card. */
+async function serializeForCustomer(orders: HydratedDocument<OrderDoc>[]) {
+  const driverIds = [...new Set(orders.filter((o) => o.driverId).map((o) => String(o.driverId)))];
+  const drivers = driverIds.length ? await Driver.find({ _id: { $in: driverIds } }) : [];
+  const ratingRows = driverIds.length
+    ? await Rating.aggregate([
+        { $match: { driverId: { $in: drivers.map((d) => d._id) } } },
+        { $group: { _id: '$driverId', avg: { $avg: '$stars' } } },
+      ])
+    : [];
+  const ratingByDriver = new Map(ratingRows.map((r) => [String(r._id), Math.round(r.avg * 10) / 10]));
+  const driverById = new Map(drivers.map((d) => [String(d._id), d]));
+
+  return orders.map((o) => {
+    const json = toSafeJson(o, ['deliveryOtpHash', 'deliveryOtp', 'deliveryOtpAttempts'])!;
+    const driver = o.driverId ? driverById.get(String(o.driverId)) : undefined;
+    return {
+      ...json,
+      deliveryOtp: o.status === 'out_for_delivery' ? o.deliveryOtp ?? null : undefined,
+      driver: driver
+        ? {
+            id: String(driver._id),
+            name: driver.fullName ?? 'Delivery partner',
+            phone: driver.phone,
+            vehicleType: driver.vehicleType,
+            vehicleNumber: driver.vehicleDetails?.registrationNumber,
+            rating: ratingByDriver.get(String(driver._id)) ?? null,
+          }
+        : null,
+    };
+  });
 }
 
 /**
@@ -175,33 +213,30 @@ export async function createOrder(req: Request, res: Response) {
   cart.couponCode = undefined;
   await cart.save();
 
-  await notifyCustomer(
-    customerId,
-    'order',
-    'Order placed',
-    `Your order #${order.orderNumber} has been placed successfully.`,
-    order._id,
-  );
+  await notifyCustomer(customerId, 'order', 'Order placed', `Your order #${order.orderNumber} has been placed successfully.`, order);
   await notifyVendor(
     order.vendorId,
     'new-order',
     `New Order #${order.orderNumber}`,
     `${items.length} item${items.length === 1 ? '' : 's'} · ₹${pricing.grandTotal}`,
-    { orderId: order._id },
+    { orderId: order._id, orderNumber: order.orderNumber },
   );
 
-  res.status(201).json(toSafeJson(order, ['deliveryOtpHash']));
+  const [json] = await serializeForCustomer([order]);
+  res.status(201).json(json);
 }
 
 export async function listOrders(req: Request, res: Response) {
-  const orders = await Order.find({ customerId: req.user!.id }).sort({ createdAt: -1 });
-  res.json(orders.map((o) => toSafeJson(o, ['deliveryOtpHash'])));
+  const { skip, limit } = arrayPagination(req.query as Record<string, unknown>);
+  const orders = await Order.find({ customerId: req.user!.id }).sort({ createdAt: -1 }).skip(skip).limit(limit);
+  res.json(await serializeForCustomer(orders));
 }
 
 export async function getOrder(req: Request, res: Response) {
   const order = await Order.findOne({ _id: req.params.id, customerId: req.user!.id });
   if (!order) throw new HttpError(404, 'Order not found');
-  res.json(toSafeJson(order, ['deliveryOtpHash']));
+  const [json] = await serializeForCustomer([order]);
+  res.json(json);
 }
 
 export async function cancelOrder(req: Request, res: Response) {
@@ -211,9 +246,7 @@ export async function cancelOrder(req: Request, res: Response) {
     throw new HttpError(409, `This order can no longer be cancelled (status: ${order.status})`);
   }
 
-  for (const item of order.items) {
-    await Product.updateOne({ _id: item.productId, 'variants.id': item.variantId }, { $inc: { 'variants.$.stock': item.quantity } });
-  }
+  await releaseOrderResources(order);
 
   const now = new Date();
   order.status = 'cancelled';
@@ -222,16 +255,17 @@ export async function cancelOrder(req: Request, res: Response) {
   order.statusHistory.push({ status: 'cancelled', at: now, note: req.body.reason });
   await order.save();
 
-  await notifyOrderStatusChange(order.customerId, order._id, order.orderNumber, 'cancelled', req.body.reason);
+  await notifyOrderStatusChange(order, 'cancelled', req.body.reason);
   await notifyVendor(
     order.vendorId,
     'order-cancellation',
     `Order #${order.orderNumber} Cancelled`,
     req.body.reason ? `Cancelled by customer · ${req.body.reason}` : 'Cancelled by customer',
-    { orderId: order._id },
+    { orderId: order._id, orderNumber: order.orderNumber },
   );
 
-  res.json(toSafeJson(order, ['deliveryOtpHash']));
+  const [json] = await serializeForCustomer([order]);
+  res.json(json);
 }
 
 export async function rateOrder(req: Request, res: Response) {
@@ -240,21 +274,30 @@ export async function rateOrder(req: Request, res: Response) {
   if (order.status !== 'delivered') {
     throw new HttpError(409, 'Only delivered orders can be rated');
   }
-  if (!order.driverId) {
-    throw new HttpError(409, 'This order has no delivery driver to rate');
+  if (order.vendorRating !== undefined && order.vendorRating !== null) {
+    throw new HttpError(409, 'This order has already been rated');
   }
 
-  const existing = await Rating.findOne({ orderId: order._id as never });
-  if (existing) throw new HttpError(409, 'This order has already been rated');
-
   const { stars, reviewText } = req.body as { stars: number; reviewText?: string };
-  const rating = await Rating.create({
-    orderId: order._id as never,
-    driverId: order.driverId,
-    customerId: req.user!.id,
-    stars,
-    reviewText,
-  });
 
-  res.status(201).json(toSafeJson(rating));
+  let rating = null;
+  if (order.driverId) {
+    const existing = await Rating.findOne({ orderId: order._id as never });
+    if (existing) throw new HttpError(409, 'This order has already been rated');
+    rating = await Rating.create({
+      orderId: order._id as never,
+      driverId: order.driverId,
+      customerId: req.user!.id,
+      stars,
+      reviewText,
+    });
+  }
+
+  order.vendorRating = stars;
+  await order.save();
+
+  res.status(201).json({
+    ...(rating ? toSafeJson(rating) : { orderId: String(order._id), customerId: req.user!.id, stars, reviewText }),
+    vendorRating: stars,
+  });
 }
